@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hyperliquid SMC Trading Terminal | Multi-Timeframe Bot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Navigation Bar -->
+    <header class="top-nav">
+      <div class="nav-brand">
+        <div class="logo-orb"></div>
+        <div class="brand-text">
+          <h1>HYPERLIQUID <span>SMC TERMINAL</span></h1>
+          <p class="subtitle">Multi-Timeframe Smart Money Concepts Execution Bot</p>
+        </div>
+      </div>
+
+      <div class="nav-controls">
+        <div class="status-chip chip-env" id="envBadge">
+          <span class="dot"></span>
+          <span id="envText">TESTNET</span>
+        </div>
+
+        <div class="status-chip chip-mode" id="modeBadge">
+          <span class="icon">🛡️</span>
+          <span id="modeText">PAPER MODE</span>
+        </div>
+
+        <button class="toggle-btn" id="autoTradeBtn" title="Toggle Auto Execution">
+          <span class="toggle-indicator"></span>
+          <span id="autoTradeText">AUTO-TRADE: ON</span>
+        </button>
+
+        <button class="action-btn scan-btn" id="scanBtn" title="Force Market Scan">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+          </svg>
+          Scan Now
+        </button>
+
+        <button class="action-btn danger-btn" id="closeAllBtn" title="Emergency Close All">
+          Emergency Close
+        </button>
+      </div>
+    </header>
+
+    <!-- Top Stats Ribbon -->
+    <section class="stats-ribbon">
+      <div class="stat-card">
+        <div class="stat-label">ACCOUNT EQUITY</div>
+        <div class="stat-value" id="accountEquity">$0.00</div>
+        <div class="stat-sub" id="accountAddress">Wallet: Not Connected</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">MARGIN USED</div>
+        <div class="stat-value" id="marginUsed">$0.00</div>
+        <div class="stat-sub">Leverage: 3x Cross</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">OPEN POSITIONS</div>
+        <div class="stat-value" id="openPositionsCount">0</div>
+        <div class="stat-sub">Max: 1 per symbol</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">TOTAL UNREALIZED PnL</div>
+        <div class="stat-value pnl-neutral" id="totalPnl">$0.00</div>
+        <div class="stat-sub">Target R:R 1:2.5</div>
+      </div>
+
+      <div class="stat-card">
+        <div class="stat-label">SMC SCAN STATUS</div>
+        <div class="stat-value live-pulse" id="scanPulse">LIVE STREAMING</div>
+        <div class="stat-sub" id="lastScanTime">Updated: Just now</div>
+      </div>
+    </section>
+
+    <!-- Multi-Timeframe SMC Heatmap / Matrix -->
+    <main class="main-content">
+      <section class="section-container">
+        <div class="section-header">
+          <div class="title-group">
+            <h2>Multi-Timeframe Structure Matrix</h2>
+            <span class="badge-info">Weekly &bull; Daily &bull; 4H &bull; 1H &bull; 15M &bull; 5M</span>
+          </div>
+          <div class="header-legend">
+            <span class="legend-pill pill-bullish">BULLISH</span>
+            <span class="legend-pill pill-bearish">BEARISH</span>
+            <span class="legend-pill pill-sweep">15M SWEEP</span>
+            <span class="legend-pill pill-bos">5M BOS</span>
+          </div>
+        </div>
+
+        <div class="mtf-grid" id="mtfMatrixContainer">
+          <!-- Populated dynamically with BTC, ETH, SOL cards -->
+          <div class="loading-placeholder">
+            <div class="spinner"></div>
+            <p>Fetching multi-timeframe candles and computing SMC market structure...</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Active Signals & Positions -->
+      <div class="grid-split">
+        <!-- Open Positions & Active Setups -->
+        <section class="section-container">
+          <div class="section-header">
+            <div class="title-group">
+              <h2>Active Positions & Setups</h2>
+              <span class="badge-count" id="positionsCountBadge">0</span>
+            </div>
+          </div>
+          <div class="table-container">
+            <table class="custom-table" id="positionsTable">
+              <thead>
+                <tr>
+                  <th>Asset</th>
+                  <th>Side</th>
+                  <th>Size</th>
+                  <th>Entry</th>
+                  <th>Current</th>
+                  <th>Stop Loss</th>
+                  <th>Take Profit</th>
+                  <th>PnL</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="positionsTableBody">
+                <tr class="empty-row">
+                  <td colspan="9">No active open positions. Watching for confirmed 15M sweep + 5M BOS setups.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- Live SMC Event Stream / Terminal Log -->
+        <section class="section-container">
+          <div class="section-header">
+            <div class="title-group">
+              <h2>SMC Activity Terminal</h2>
+              <span class="badge-live">LIVE FEED</span>
+            </div>
+            <button class="clear-btn" id="clearLogsBtn">Clear</button>
+          </div>
+          <div class="terminal-log" id="terminalLogs">
+            <div class="log-entry log-system">
+              <span class="log-time">[SYSTEM]</span>
+              <span class="log-msg">Hyperliquid Multi-Timeframe Bot connected. Monitoring BTC, ETH, SOL.</span>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Strategy & Setup Guide -->
+      <section class="section-container guide-container">
+        <div class="section-header">
+          <div class="title-group">
+            <h2>SMC Strategy Architecture & Trading Rules</h2>
+          </div>
+        </div>
+        <div class="guide-grid">
+          <div class="guide-card">
+            <div class="guide-icon">1</div>
+            <h3>Macro Tier (1W / 1D)</h3>
+            <p>Identifies swing highs, swing lows, and whether candle body closes form higher highs/lows (Bullish) or lower highs/lows (Bearish) to determine dominant institutional bias.</p>
+          </div>
+          <div class="guide-card">
+            <div class="guide-icon">2</div>
+            <h3>Intermediate Flow (4H / 1H)</h3>
+            <p>Validates current directional momentum and ensures intraday order flow aligns with the macro direction before lower-timeframe execution is authorized.</p>
+          </div>
+          <div class="guide-card">
+            <div class="guide-icon">3</div>
+            <h3>15M Liquidity Sweep</h3>
+            <p>Detects stop loss liquidity grabs: price wicks beyond a key 15M swing high or low but closes back inside the range, trapping counter-trend participants.</p>
+          </div>
+          <div class="guide-card">
+            <div class="guide-icon">4</div>
+            <h3>5M BOS Entry & Sizing</h3>
+            <p>A 5M candle body close breaks structure in the sweep direction. Enters market position with Stop Loss at the 15M sweep extreme wick and dynamic 1:2.5 R:R target.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <p>Hyperliquid Multi-Timeframe SMC Trading Bot &bull; Python SDK EIP-712 Engine &bull; Testnet & Mainnet Ready</p>
+    </footer>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

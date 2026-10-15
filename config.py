@@ -1,0 +1,56 @@
+"""Configuration module for Hyperliquid MTF SMC Trading Bot."""
+
+import os
+from dataclasses import dataclass, field
+from typing import List
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+@dataclass
+class BotConfig:
+    # Environment
+    env: str = os.getenv("HYPERLIQUID_ENV", "testnet").lower()
+    private_key: str = os.getenv("HYPERLIQUID_PRIVATE_KEY", "")
+    account_address: str = os.getenv("HYPERLIQUID_ACCOUNT_ADDRESS", "")
+    
+    # Operation Mode
+    dry_run: bool = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
+    auto_trade_enabled: bool = os.getenv("AUTO_TRADE_ENABLED", "true").lower() in ("true", "1", "yes")
+    
+    # Symbols
+    symbols: List[str] = field(default_factory=lambda: [
+        s.strip().upper() for s in os.getenv("TRADING_SYMBOLS", "BTC,ETH,SOL").split(",") if s.strip()
+    ])
+    
+    # Timeframes
+    timeframes: List[str] = field(default_factory=lambda: ["1w", "1d", "4h", "1h", "15m", "5m"])
+    
+    # Risk parameters
+    risk_usd_per_trade: float = float(os.getenv("RISK_USD_PER_TRADE", "1.00"))
+    min_order_notional: float = float(os.getenv("MIN_ORDER_NOTIONAL", "11.0"))
+    leverage: int = int(os.getenv("LEVERAGE", "3"))
+    target_rr: float = float(os.getenv("TARGET_RR", "2.5"))
+    sl_buffer_pct: float = float(os.getenv("SL_BUFFER_PCT", "0.001"))
+    
+    # SMC Lookbacks
+    swing_lookback: int = 2  # candles to left and right to define a pivot high/low
+    sweep_max_candles_age: int = 12  # how many 15m candles back a sweep remains valid
+    trigger_max_5m_candles: int = 8  # how many 5m candles after a 15m sweep to confirm a 5m BOS
+    
+    # Dashboard
+    dashboard_port: int = int(os.getenv("DASHBOARD_PORT", "8000"))
+    
+    @property
+    def is_testnet(self) -> bool:
+        return self.env == "testnet"
+
+    @property
+    def api_url(self) -> str:
+        from hyperliquid.utils import constants
+        return constants.TESTNET_API_URL if self.is_testnet else constants.MAINNET_API_URL
+
+
+# Default global instance
+config = BotConfig()
