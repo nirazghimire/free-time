@@ -71,6 +71,8 @@ class TimeframeAnalysis:
     recent_sweeps: List[LiquiditySweep] = field(default_factory=list)
     swing_highs: List[SwingPoint] = field(default_factory=list)
     swing_lows: List[SwingPoint] = field(default_factory=list)
+    total_candles: int = 0
+    latest_timestamp: int = 0
 
 
 class SMCEngine:
@@ -233,15 +235,22 @@ class SMCEngine:
                     ))
                 # Wick breached swing high, but body closed BELOW -> Bearish Liquidity Sweep
                 elif c_high > target_sh.price and c_close <= target_sh.price:
-                    sweeps.append(LiquiditySweep(
-                        direction=TrendBias.BEARISH,  # Bearish rejection after sweeping buy-side
-                        swing_point=target_sh,
-                        sweep_candle_index=i,
-                        sweep_timestamp=c_time,
-                        wick_extreme=c_high,
-                        candle_close=c_close,
-                        is_active=True
-                    ))
+                    if sweeps and sweeps[-1].swing_point == target_sh and sweeps[-1].direction == TrendBias.BEARISH:
+                        if c_high > sweeps[-1].wick_extreme:
+                            sweeps[-1].wick_extreme = c_high
+                            sweeps[-1].sweep_candle_index = i
+                            sweeps[-1].sweep_timestamp = c_time
+                            sweeps[-1].candle_close = c_close
+                    else:
+                        sweeps.append(LiquiditySweep(
+                            direction=TrendBias.BEARISH,  # Bearish rejection after sweeping buy-side
+                            swing_point=target_sh,
+                            sweep_candle_index=i,
+                            sweep_timestamp=c_time,
+                            wick_extreme=c_high,
+                            candle_close=c_close,
+                            is_active=True
+                        ))
 
             # 2. Check for Bearish Break (below Swing Low)
             if target_sl:
@@ -265,15 +274,22 @@ class SMCEngine:
                     ))
                 # Wick breached swing low, but body closed ABOVE -> Bullish Liquidity Sweep
                 elif c_low < target_sl.price and c_close >= target_sl.price:
-                    sweeps.append(LiquiditySweep(
-                        direction=TrendBias.BULLISH,  # Bullish rejection after sweeping sell-side
-                        swing_point=target_sl,
-                        sweep_candle_index=i,
-                        sweep_timestamp=c_time,
-                        wick_extreme=c_low,
-                        candle_close=c_close,
-                        is_active=True
-                    ))
+                    if sweeps and sweeps[-1].swing_point == target_sl and sweeps[-1].direction == TrendBias.BULLISH:
+                        if c_low < sweeps[-1].wick_extreme:
+                            sweeps[-1].wick_extreme = c_low
+                            sweeps[-1].sweep_candle_index = i
+                            sweeps[-1].sweep_timestamp = c_time
+                            sweeps[-1].candle_close = c_close
+                    else:
+                        sweeps.append(LiquiditySweep(
+                            direction=TrendBias.BULLISH,  # Bullish rejection after sweeping sell-side
+                            swing_point=target_sl,
+                            sweep_candle_index=i,
+                            sweep_timestamp=c_time,
+                            wick_extreme=c_low,
+                            candle_close=c_close,
+                            is_active=True
+                        ))
 
         # Check latest active unbroken swing high & low
         unbroken_sh = [s for s in swing_highs if not s.broken]
@@ -297,7 +313,9 @@ class SMCEngine:
             recent_events=events[-10:],
             recent_sweeps=sweeps[-10:],
             swing_highs=swing_highs[-15:],
-            swing_lows=swing_lows[-15:]
+            swing_lows=swing_lows[-15:],
+            total_candles=len(df),
+            latest_timestamp=int(timestamps[-1]) if len(timestamps) > 0 else 0
         )
 
     def detect_active_15m_sweep(
@@ -307,15 +325,27 @@ class SMCEngine:
     ) -> Optional[LiquiditySweep]:
         """
         Check if there is a recent active 15m liquidity sweep that hasn't been invalidated.
-        A bullish sweep is invalidated if price later closes below the wick extreme.
-        A bearish sweep is invalidated if price later closes above the wick extreme.
+        - Must be within max_age_candles.
+        - A bullish sweep is invalidated if price later closes below the wick extreme.
+        - A bearish sweep is invalidated if price later closes above the wick extreme.
         """
         if not analysis_15m.recent_sweeps:
             return None
 
         # Check most recent sweeps in reverse
         for sweep in reversed(analysis_15m.recent_sweeps):
-            # Check age: sweeps shouldn't be too old
+            # Check age: sweep cannot be older than max_age_candles
+            if analysis_15m.total_candles > 0:
+                candles_ago = (analysis_15m.total_candles - 1) - sweep.sweep_candle_index
+                if candles_ago > max_age_candles:
+                    sweep.is_active = False
+                    continue
+            elif analysis_15m.latest_timestamp > 0:
+                max_age_ms = max_age_candles * 15 * 60 * 1000
+                if (analysis_15m.latest_timestamp - sweep.sweep_timestamp) > max_age_ms:
+                    sweep.is_active = False
+                    continue
+
             # If current price violates the wick extreme, it's invalidated
             if sweep.direction == TrendBias.BULLISH:
                 if analysis_15m.current_price < sweep.wick_extreme:
@@ -339,7 +369,7 @@ class SMCEngine:
     ) -> Optional[StructureEvent]:
         """
         Check if a 5m Break of Structure (BOS) or CHoCH occurred in the direction of the 15m sweep,
-        strictly after the sweep occurred.
+        strictly after the sweep occurred and within max_lookback_candles.
         - For Bullish Sweep: Look for a 5m candle body close above a 5m swing high (Bullish BOS/CHoCH).
         - For Bearish Sweep: Look for a 5m candle body close below a 5m swing low (Bearish BOS/CHoCH).
         """
@@ -351,8 +381,19 @@ class SMCEngine:
             if event.timestamp < active_sweep.sweep_timestamp:
                 continue
 
+            # Check max lookback age
+            if analysis_5m.total_candles > 0:
+                candles_ago = (analysis_5m.total_candles - 1) - event.candle_index
+                if candles_ago > max_lookback_candles:
+                    continue
+            elif analysis_5m.latest_timestamp > 0:
+                max_age_ms = max_lookback_candles * 5 * 60 * 1000
+                if (analysis_5m.latest_timestamp - event.timestamp) > max_age_ms:
+                    continue
+
             # Must match the sweep direction
             if event.direction == active_sweep.direction:
                 return event
 
         return None
+

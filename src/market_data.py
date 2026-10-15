@@ -23,6 +23,26 @@ LOOKBACK_MS = {
     "5m": 2 * 24 * 3600 * 1000,     # 2 days (~576 candles)
 }
 
+# Milliseconds duration for single candle intervals
+INTERVAL_MS = {
+    "1w": 7 * 24 * 3600 * 1000,
+    "1d": 24 * 3600 * 1000,
+    "4h": 4 * 3600 * 1000,
+    "1h": 3600 * 1000,
+    "15m": 15 * 60 * 1000,
+    "5m": 5 * 60 * 1000,
+}
+
+# TTL cache in seconds: Higher timeframes don't change every 20 seconds
+CANDLE_CACHE_TTL = {
+    "1w": 3600,   # 1 hour
+    "1d": 1800,   # 30 mins
+    "4h": 600,    # 10 mins
+    "1h": 300,    # 5 mins
+    "15m": 0,     # Fresh every scan
+    "5m": 0,      # Fresh every scan
+}
+
 
 class MarketDataClient:
     def __init__(self, config: BotConfig):
@@ -32,6 +52,7 @@ class MarketDataClient:
         self._meta_cache: Optional[Dict[str, Any]] = None
         self._asset_decimals: Dict[str, int] = {}
         self._cache_candles: Dict[str, Dict[str, Any]] = {}
+        self._candle_cache: Dict[str, tuple] = {}  # key: (symbol, interval) -> (cached_at_sec, df)
 
     def get_meta(self) -> Dict[str, Any]:
         """Fetch universe metadata including szDecimals."""
@@ -65,12 +86,30 @@ class MarketDataClient:
         mids = self.get_mid_prices()
         return mids.get(symbol.upper())
 
-    def fetch_candles(self, symbol: str, interval: str, limit_candles: int = 250) -> pd.DataFrame:
+    def fetch_candles(
+        self,
+        symbol: str,
+        interval: str,
+        limit_candles: int = 250,
+        only_closed: bool = True
+    ) -> pd.DataFrame:
         """
         Fetch OHLCV candle data for a symbol and interval.
-        Returns a sorted pandas DataFrame with columns: ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+        - only_closed=True filters out the in-progress (active) candle to ensure SMC
+          swings, BOS, and sweeps only execute on confirmed candle body closes.
+        - Respects TTL caching for higher timeframes to prevent rate-limiting.
         """
-        now_ms = int(time.time() * 1000)
+        sym_key = f"{symbol.upper()}_{interval.lower()}"
+        now_sec = time.time()
+        ttl = CANDLE_CACHE_TTL.get(interval.lower(), 0)
+
+        # Check TTL cache
+        if ttl > 0 and sym_key in self._candle_cache:
+            cached_at, cached_df = self._candle_cache[sym_key]
+            if (now_sec - cached_at) < ttl and not cached_df.empty:
+                return cached_df.copy()
+
+        now_ms = int(now_sec * 1000)
         lookback = LOOKBACK_MS.get(interval, 48 * 3600 * 1000)
         start_ms = now_ms - lookback
 
@@ -79,10 +118,19 @@ class MarketDataClient:
             if not raw_candles:
                 return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
+            interval_dur_ms = INTERVAL_MS.get(interval.lower(), 0)
             records = []
             for c in raw_candles:
+                c_open_time = int(c["t"])
+                c_close_time = int(c.get("T", c_open_time + interval_dur_ms))
+
+                # Filter out in-progress candle if only_closed is True
+                if only_closed:
+                    if c_close_time > now_ms:
+                        continue
+
                 records.append({
-                    "timestamp": c["t"],
+                    "timestamp": c_open_time,
                     "open": float(c["o"]),
                     "high": float(c["h"]),
                     "low": float(c["l"]),
@@ -94,6 +142,11 @@ class MarketDataClient:
             df = df.sort_values("timestamp").reset_index(drop=True)
             if len(df) > limit_candles:
                 df = df.iloc[-limit_candles:].reset_index(drop=True)
+
+            # Store in TTL cache if applicable
+            if ttl > 0 and not df.empty:
+                self._candle_cache[sym_key] = (now_sec, df.copy())
+
             return df
 
         except Exception as e:
@@ -101,10 +154,10 @@ class MarketDataClient:
             return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
     def fetch_all_timeframes(self, symbol: str) -> Dict[str, pd.DataFrame]:
-        """Fetch all configured timeframes for a symbol."""
+        """Fetch all configured timeframes for a symbol with confirmed closed candles."""
         result = {}
         for tf in self.config.timeframes:
-            result[tf] = self.fetch_candles(symbol, tf)
+            result[tf] = self.fetch_candles(symbol, tf, only_closed=True)
         return result
 
     def get_account_state(self, user_address: Optional[str] = None) -> Dict[str, Any]:

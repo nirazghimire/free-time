@@ -28,6 +28,8 @@ class SMCBot:
         self.mid_prices: Dict[str, float] = {}
         self.event_log: List[Dict[str, Any]] = []
         self._listeners: List[Callable[[Dict[str, Any]], None]] = []
+        # Deduplication: tracks sweep timestamps already traded to prevent re-entry on same event
+        self._executed_sweep_keys: set = set()
 
     def add_listener(self, callback: Callable[[Dict[str, Any]], None]):
         """Subscribe to real-time events for web dashboard."""
@@ -77,21 +79,44 @@ class SMCBot:
 
                 # Check for trade execution
                 if eval_res.trade_setup and self.config.auto_trade_enabled:
-                    logger.info(f"🚀 Triggering automated execution for {symbol} {eval_res.trade_setup.direction.value}")
-                    exec_res = self.executor.execute_trade(eval_res.trade_setup)
-                    self.broadcast_event("TRADE_EXECUTION", {
-                        "symbol": symbol,
-                        "setup": {
-                            "direction": eval_res.trade_setup.direction.value,
-                            "entry_price": eval_res.trade_setup.entry_price,
-                            "stop_loss": eval_res.trade_setup.stop_loss,
-                            "take_profit": eval_res.trade_setup.take_profit,
-                            "size": eval_res.trade_setup.size,
-                            "notional_usd": eval_res.trade_setup.notional_usd,
-                            "risk_usd": eval_res.trade_setup.risk_usd,
-                        },
-                        "execution_result": exec_res
-                    })
+                    sweep = eval_res.active_sweep_15m
+                    # Build a unique key per symbol + sweep candle timestamp
+                    sweep_key = f"{symbol}_{sweep.sweep_timestamp}" if sweep else None
+
+                    # Deduplication guard: never re-enter on the same 15M sweep event
+                    if sweep_key and sweep_key in self._executed_sweep_keys:
+                        logger.debug(
+                            f"[{symbol}] Sweep @ ts={sweep.sweep_timestamp} already traded "
+                            f"— cooldown active. Skipping."
+                        )
+                    else:
+                        logger.info(
+                            f"\U0001f680 Triggering automated execution for {symbol} "
+                            f"{eval_res.trade_setup.direction.value}"
+                        )
+                        exec_res = self.executor.execute_trade(eval_res.trade_setup)
+
+                        # Record sweep key on any real attempt (success or already-in-pos skip)
+                        if sweep_key and exec_res.get("status") in ("success", "skipped"):
+                            self._executed_sweep_keys.add(sweep_key)
+                            # Prune oldest keys so memory stays bounded
+                            if len(self._executed_sweep_keys) > 200:
+                                for k in sorted(self._executed_sweep_keys)[:50]:
+                                    self._executed_sweep_keys.discard(k)
+
+                        self.broadcast_event("TRADE_EXECUTION", {
+                            "symbol": symbol,
+                            "setup": {
+                                "direction": eval_res.trade_setup.direction.value,
+                                "entry_price": eval_res.trade_setup.entry_price,
+                                "stop_loss": eval_res.trade_setup.stop_loss,
+                                "take_profit": eval_res.trade_setup.take_profit,
+                                "size": eval_res.trade_setup.size,
+                                "notional_usd": eval_res.trade_setup.notional_usd,
+                                "risk_usd": eval_res.trade_setup.risk_usd,
+                            },
+                            "execution_result": exec_res
+                        })
 
             except Exception as e:
                 logger.error(f"Error evaluating {symbol}: {e}", exc_info=True)

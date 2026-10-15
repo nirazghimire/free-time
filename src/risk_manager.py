@@ -33,6 +33,16 @@ class TradeSetup:
     sweep: LiquiditySweep
 
 
+def format_hyperliquid_price(px: float, sz_decimals: int) -> float:
+    """Format price according to Hyperliquid perpetual tick rules:
+    Max 5 significant figures and max (6 - sz_decimals) decimal places.
+    """
+    if px <= 0:
+        return 0.0
+    max_decimals = max(0, 6 - sz_decimals)
+    return round(float(f"{px:.5g}"), max_decimals)
+
+
 class RiskManager:
     def __init__(self, config: BotConfig):
         self.config = config
@@ -105,24 +115,44 @@ class RiskManager:
 
         # 3. Base Currency Size and Decimal Precision
         raw_size = target_notional / entry_price
-        # Round down to szDecimals
         factor = 10 ** sz_decimals
-        size = math.floor(raw_size * factor) / factor
+        size = round(math.floor(raw_size * factor) / factor, sz_decimals)
 
         if size <= 0:
             logger.warning(f"[{symbol}] Calculated size is 0 after decimal truncation")
             return None
 
         actual_notional = size * entry_price
+
+        # If floor truncation dropped notional below minimum, try bumping 1 minimum step if margin allows
+        if actual_notional < min_notional:
+            step = 1.0 / factor
+            bumped_size = round(size + step, sz_decimals)
+            bumped_notional = bumped_size * entry_price
+            if bumped_notional <= max_notional_by_leverage:
+                size = bumped_size
+                actual_notional = bumped_notional
+            else:
+                logger.warning(
+                    f"[{symbol}] Order notional (${actual_notional:.2f}) is below minimum (${min_notional:.2f}) "
+                    f"and cannot be bumped without exceeding leverage limit (${max_notional_by_leverage:.2f})"
+                )
+                return None
+
         actual_risk_usd = actual_notional * sl_distance_pct
         actual_rr = abs(take_profit - entry_price) / sl_distance
+
+        # Format SL and TP according to Hyperliquid's 5 significant figures and tick precision rules
+        formatted_sl = format_hyperliquid_price(stop_loss, sz_decimals)
+        formatted_tp = format_hyperliquid_price(take_profit, sz_decimals)
+        formatted_entry = format_hyperliquid_price(entry_price, sz_decimals)
 
         return TradeSetup(
             symbol=symbol,
             direction=direction,
-            entry_price=entry_price,
-            stop_loss=round(stop_loss, 2 if entry_price > 10 else 4),
-            take_profit=round(take_profit, 2 if entry_price > 10 else 4),
+            entry_price=formatted_entry,
+            stop_loss=formatted_sl,
+            take_profit=formatted_tp,
             risk_reward=round(actual_rr, 2),
             size=size,
             notional_usd=round(actual_notional, 2),

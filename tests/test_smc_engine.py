@@ -313,3 +313,132 @@ def test_5m_trigger_rejects_past_events_and_wrong_direction():
     trigger_past = smc.detect_5m_trigger(analysis_past, sweep)
     # Must reject events that happened before the sweep
     assert trigger_past is None
+
+
+# ─── New critical-fix tests ───────────────────────────────────────────────────
+
+def test_15m_sweep_age_enforcement():
+    """Sweep older than max_age_candles must be marked inactive and not returned."""
+    smc = SMCEngine(swing_lookback=2)
+    dummy_sp = SwingPoint(index=2, timestamp=1700000000000, price=100.0, is_high=False)
+
+    # Build analysis with a sweep that happened at candle index 3, but total_candles is 30
+    # => candles_ago = 29 - 3 = 26, which exceeds max_age_candles=12
+    old_sweep = LiquiditySweep(
+        direction=TrendBias.BULLISH,
+        swing_point=dummy_sp,
+        sweep_candle_index=3,
+        sweep_timestamp=1700003000000,
+        wick_extreme=97.0,
+        candle_close=100.5,
+        is_active=True
+    )
+
+    from src.smc_engine import TimeframeAnalysis
+    analysis = TimeframeAnalysis(
+        symbol="BTC",
+        timeframe="15m",
+        bias=TrendBias.BULLISH,
+        current_price=101.0,
+        recent_sweeps=[old_sweep],
+        total_candles=30,
+        latest_timestamp=1700030000000
+    )
+
+    result = smc.detect_active_15m_sweep(analysis, max_age_candles=12)
+    assert result is None, "Old sweep should be rejected by age enforcement"
+    assert old_sweep.is_active is False, "Old sweep should be marked inactive"
+
+
+def test_15m_sweep_dedup_merges_consecutive_wicks():
+    """Two consecutive wicks on the same swing low should merge into one sweep with worst wick."""
+    smc = SMCEngine(swing_lookback=2)
+    # Price structure: dip below 90 twice on the same swing low, should merge
+    data = [
+        [100, 102, 98, 101],   # 0
+        [101, 105, 100, 104],  # 1
+        [104, 110, 103, 108],  # 2 - SH
+        [108, 107, 101, 102],  # 3
+        [102, 103, 96, 98],    # 4
+        [98,  99,  90, 95],    # 5 - SL (low=90)
+        [95,  100, 94, 99],    # 6
+        [99,  102, 98, 101],   # 7
+        # Candle 8: wick below 90 (sweep 1, wick=88)
+        [101, 102, 88, 95],    # 8 - sweep wick extreme = 88, close=95 > 90  -> BULLISH sweep
+        # Candle 9: another wick below 90, even deeper (sweep 2, wick=86)
+        [95,  97,  86, 93],    # 9 - close=93 > 90 -> should MERGE, not create new sweep
+        [93,  96,  92, 95],    # 10
+        [95,  98,  94, 97],    # 11
+    ]
+    df = create_candle_df(data)
+    analysis = smc.analyze_structure(df, "BTC", "15m")
+
+    bullish_sweeps = [s for s in analysis.recent_sweeps if s.direction == TrendBias.BULLISH]
+    # Both wicks on the same swing low should be merged into a single sweep record
+    assert len(bullish_sweeps) == 1, (
+        f"Expected 1 merged sweep, got {len(bullish_sweeps)}"
+    )
+    # Merged sweep should use the worst (lowest) wick extreme
+    assert bullish_sweeps[0].wick_extreme == 86.0, (
+        f"Expected merged wick=86.0, got {bullish_sweeps[0].wick_extreme}"
+    )
+
+
+def test_5m_trigger_max_lookback_candles_enforced():
+    """5M trigger event older than max_lookback_candles after the sweep is rejected."""
+    smc = SMCEngine(swing_lookback=2)
+    dummy_sp = SwingPoint(index=2, timestamp=1700000000000, price=100.0, is_high=False)
+
+    sweep = LiquiditySweep(
+        direction=TrendBias.BULLISH,
+        swing_point=dummy_sp,
+        sweep_candle_index=5,
+        sweep_timestamp=1700005000000,
+        wick_extreme=95.0,
+        candle_close=100.5
+    )
+
+    # Build candles with swing high at idx 2 (high=110, SH price=110),
+    # a sweep at idx 5 (low=95, close=100 >= 100 -> bullish sweep),
+    # then BOS at idx 6 (close=111 > 110), then 8 more flat candles.
+    # total_candles=15; trigger candle_index=6 => candles_ago=14-6=8 > max_lookback=7 -> rejected
+    data = [
+        [100, 102, 99, 101],   # 0
+        [101, 105, 100, 104],  # 1
+        [104, 110, 103, 108],  # 2 - SH = 110
+        [108, 106, 104, 105],  # 3
+        [105, 104, 103, 103],  # 4
+        [103, 101, 95,  100],  # 5 - bullish sweep: low=95 < SL, close=100 >= SL
+        [100, 112, 99,  111],  # 6 - BOS: close=111 > SH=110 ✓
+        [111, 108, 106, 107],  # 7  plateau
+        [107, 108, 106, 107],  # 8  plateau
+        [107, 108, 106, 107],  # 9  plateau
+        [107, 108, 106, 107],  # 10 plateau
+        [107, 108, 106, 107],  # 11 plateau
+        [107, 108, 106, 107],  # 12 plateau
+        [107, 108, 106, 107],  # 13 plateau
+        [107, 108, 106, 107],  # 14 plateau
+    ]
+    df = create_candle_df(data)
+    # Set timestamps so all events are AFTER the sweep timestamp (1700005000000)
+    base = 1700005000000
+    interval = 300000
+    df["timestamp"] = [base + i * interval for i in range(len(df))]
+
+    analysis = smc.analyze_structure(df, "BTC", "5m")
+
+    # Confirm there IS a BOS event so we know the engine is working
+    bullish_events = [e for e in analysis.recent_events if e.direction == TrendBias.BULLISH]
+    assert len(bullish_events) > 0, (
+        "Expected at least one bullish BOS event in test data — check candle structure"
+    )
+
+    # The BOS event is at candle_index=6; total_candles=15 => candles_ago=8 > max_lookback=7 -> rejected
+    trigger = smc.detect_5m_trigger(analysis, sweep, max_lookback_candles=7)
+    assert trigger is None, (
+        f"Trigger too old should be rejected by max_lookback_candles enforcement; "
+        f"event at idx={bullish_events[-1].candle_index}, "
+        f"candles_ago={(analysis.total_candles - 1) - bullish_events[-1].candle_index}"
+    )
+
+

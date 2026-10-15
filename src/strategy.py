@@ -112,13 +112,20 @@ class MTFStrategy:
         if active_sweep:
             summary_msg += f" | Active 15M Sweep: {active_sweep.direction.value} @ ${active_sweep.wick_extreme:,.2f}"
 
-            # Only seek entry trigger if sweep matches the aligned higher-timeframe trend
+            # ENFORCE: Only seek entry trigger if intermediate trend aligns with macro bias AND sweep matches macro bias
             # (or if macro is neutral but intermediate strongly aligned)
-            sweep_matches_trend = (active_sweep.direction == macro_bias) or (
-                macro_bias == TrendBias.NEUTRAL and active_sweep.direction == intermediate_trend
+            sweep_matches_trend = (
+                is_aligned and (active_sweep.direction == macro_bias)
+            ) or (
+                macro_bias == TrendBias.NEUTRAL and intermediate_trend != TrendBias.NEUTRAL and (active_sweep.direction == intermediate_trend)
             )
 
-            if sweep_matches_trend and analysis_5m:
+            if not sweep_matches_trend:
+                if not is_aligned and macro_bias != TrendBias.NEUTRAL:
+                    summary_msg += f" | Intermediate trend ({intermediate_trend.value}) opposes Macro bias ({macro_bias.value}) - Discarded"
+                else:
+                    summary_msg += f" | Sweep ({active_sweep.direction.value}) counter to HTF bias ({macro_bias.value}) - Ignored"
+            elif analysis_5m:
                 trigger_5m = self.smc.detect_5m_trigger(
                     analysis_5m,
                     active_sweep,
@@ -148,8 +155,6 @@ class MTFStrategy:
                         )
                 else:
                     summary_msg += " | Waiting for 5M BOS confirmation candle close"
-            elif not sweep_matches_trend:
-                summary_msg += f" | Sweep ({active_sweep.direction.value}) counter to HTF bias ({macro_bias.value}) - Ignored"
 
         return SymbolEvaluation(
             symbol=symbol,

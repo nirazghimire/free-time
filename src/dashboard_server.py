@@ -67,6 +67,9 @@ class DashboardServer:
     async def handle_toggle_dryrun(self, request: web.Request) -> web.Response:
         self.bot.config.dry_run = not self.bot.config.dry_run
         self.bot.executor.is_dry_run = self.bot.config.dry_run
+        # Re-initialize exchange client when switching TO live mode so real orders can be submitted
+        if not self.bot.config.dry_run and self.bot.executor.exchange is None:
+            self.bot.executor._init_exchange()
         mode = "PAPER" if self.bot.config.dry_run else "LIVE"
         self.bot.broadcast_event("CONFIG_CHANGED", {"mode": mode})
         return web.json_response({"dry_run": self.bot.config.dry_run, "mode": mode})
