@@ -33,11 +33,17 @@ class BotConfig:
     leverage: int = int(os.getenv("LEVERAGE", "3"))
     target_rr: float = float(os.getenv("TARGET_RR", "2.5"))
     sl_buffer_pct: float = float(os.getenv("SL_BUFFER_PCT", "0.001"))
+    max_open_positions: int = int(os.getenv("MAX_OPEN_POSITIONS", "1"))  # 1 position max for $10-$20 accounts
     
     # SMC Lookbacks
     swing_lookback: int = 2  # candles to left and right to define a pivot high/low
     sweep_max_candles_age: int = 12  # how many 15m candles back a sweep remains valid
-    trigger_max_5m_candles: int = 8  # how many 5m candles after a 15m sweep to confirm a 5m BOS
+    trigger_max_5m_candles: int = 3  # tightened to 3 candles (15 mins) to prevent price chasing
+
+    # Strategy Configuration
+    strategy_mode: str = os.getenv("STRATEGY_MODE", "DEMAND_FVG_CONFLUENCE").upper()  # "DEMAND_FVG_CONFLUENCE" or "SWEEP_BOS"
+    rejection_wick_ratio: float = float(os.getenv("REJECTION_WICK_RATIO", "0.30"))  # Min lower/upper wick ratio for reaction confirmation
+    demand_zone_max_age_candles: int = int(os.getenv("DEMAND_ZONE_MAX_AGE_CANDLES", "50"))  # Max age of active demand/supply zone
 
     # Trailing Stop / Breakeven
     enable_breakeven_at_1r: bool = os.getenv("ENABLE_BREAKEVEN_AT_1R", "true").lower() in ("true", "1", "yes")

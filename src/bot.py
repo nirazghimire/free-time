@@ -113,14 +113,32 @@ class SMCBot:
 
                 # Check for trade execution
                 if eval_res.trade_setup and self.config.auto_trade_enabled:
-                    sweep = eval_res.active_sweep_15m
-                    # Build a unique key per symbol + sweep candle timestamp
-                    sweep_key = f"{symbol}_{sweep.sweep_timestamp}" if sweep else None
+                    # Max concurrent positions guard to protect small accounts from overleveraging
+                    current_open_count = len(self.executor.paper_positions)
+                    if current_open_count >= getattr(self.config, "max_open_positions", 1):
+                        logger.info(
+                            f"[{symbol}] Max concurrent positions limit reached "
+                            f"({current_open_count}/{getattr(self.config, 'max_open_positions', 1)}). "
+                            f"Skipping entry to protect account margin."
+                        )
+                        continue
 
-                    # Deduplication guard: never re-enter on the same 15M sweep event
-                    if sweep_key and sweep_key in self._executed_sweep_keys:
+                    sweep = eval_res.active_sweep_15m
+                    reaction = eval_res.reaction_confirmation
+                    # Build a unique key per symbol + event timestamp (sweep, reaction, or zone)
+                    if reaction:
+                        event_key = f"{symbol}_reaction_{reaction.timestamp}"
+                    elif sweep:
+                        event_key = f"{symbol}_sweep_{sweep.sweep_timestamp}"
+                    elif eval_res.active_demand_zone:
+                        event_key = f"{symbol}_zone_{eval_res.active_demand_zone.timestamp}"
+                    else:
+                        event_key = None
+
+                    # Deduplication guard: never re-enter on the same setup event
+                    if event_key and event_key in self._executed_sweep_keys:
                         logger.debug(
-                            f"[{symbol}] Sweep @ ts={sweep.sweep_timestamp} already traded "
+                            f"[{symbol}] Event '{event_key}' already traded "
                             f"— cooldown active. Skipping."
                         )
                     else:
@@ -130,9 +148,9 @@ class SMCBot:
                         )
                         exec_res = self.executor.execute_trade(eval_res.trade_setup)
 
-                        # Record sweep key on any real attempt (success or already-in-pos skip)
-                        if sweep_key and exec_res.get("status") in ("success", "skipped"):
-                            self._executed_sweep_keys.add(sweep_key)
+                        # Record event key on any real attempt (success or already-in-pos skip)
+                        if event_key and exec_res.get("status") in ("success", "skipped"):
+                            self._executed_sweep_keys.add(event_key)
                             # Prune oldest keys so memory stays bounded
                             if len(self._executed_sweep_keys) > 200:
                                 for k in sorted(self._executed_sweep_keys)[:50]:
@@ -193,6 +211,7 @@ class SMCBot:
                     "has_sweep": len(ta.recent_sweeps) > 0,
                     "has_bos": any(e.event_type.value == "BOS" for e in ta.recent_events),
                     "has_choch": any(e.event_type.value == "CHOCH" for e in ta.recent_events),
+                    "active_zones_count": len(ta.active_demand_zones),
                     "active_fvgs_count": len(ta.active_fvgs),
                 }
 
@@ -215,6 +234,18 @@ class SMCBot:
                     "close": ev.trigger_5m.candle_close,
                     "direction": ev.trigger_5m.direction.value
                 } if ev.trigger_5m else None,
+                "has_reaction": ev.reaction_confirmation is not None,
+                "reaction_details": {
+                    "type": ev.reaction_confirmation.reaction_type,
+                    "price": ev.reaction_confirmation.reaction_price,
+                    "invalidation_level": ev.reaction_confirmation.invalidation_level,
+                } if ev.reaction_confirmation else None,
+                "demand_zone_details": {
+                    "direction": ev.active_demand_zone.direction.value,
+                    "top": ev.active_demand_zone.top,
+                    "bottom": ev.active_demand_zone.bottom,
+                    "timeframe": ev.active_demand_zone.timeframe
+                } if ev.active_demand_zone else None,
                 "trade_setup": {
                     "direction": ev.trade_setup.direction.value,
                     "entry": ev.trade_setup.entry_price,

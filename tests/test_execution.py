@@ -164,3 +164,49 @@ def test_reconcile_exchange_positions_adoption_and_closure():
     assert any(e.get("event") == "POSITION_CLOSED_ON_EXCHANGE" for e in closure_events)
     assert "SOL" not in executor.paper_positions
     assert executor.trade_history[-1]["status"] == "CLOSED_ON_EXCHANGE"
+
+
+def test_update_live_stop_loss_formatting_and_cancel_old():
+    """Verify _update_live_stop_loss cancels old SL and formats with correct sz_decimals."""
+    from unittest.mock import MagicMock
+    config = BotConfig(dry_run=False)
+    executor = OrderExecutor(config)
+    mock_exchange = MagicMock()
+    executor.exchange = mock_exchange
+    executor.is_dry_run = False
+
+    # Call with old_sl_oid=12345 and sz_decimals=1 (BTC)
+    executor._update_live_stop_loss("BTC", is_buy=False, size=0.001, new_sl_px=81523.456, sz_decimals=1, old_sl_oid=12345)
+    mock_exchange.cancel.assert_called_once_with("BTC", 12345)
+    mock_exchange.order.assert_called_once()
+    call_args = mock_exchange.order.call_args[1]
+    assert call_args["name"] == "BTC"
+    assert call_args["limit_px"] == 81523.0  # 5 sig figs for BTC formatted with sz_decimals=1
+
+
+def test_execute_live_trade_inner_matching_error_rejection():
+    """Verify live trade rejects if matching engine returns inner error in statuses."""
+    from unittest.mock import MagicMock
+    config = BotConfig(dry_run=False)
+    executor = OrderExecutor(config)
+    mock_exchange = MagicMock()
+    # Simulate matching engine error (e.g. slippage exceeded or margin error)
+    mock_exchange.market_open.return_value = {
+        "status": "ok",
+        "response": {
+            "type": "order",
+            "data": {
+                "statuses": [{"error": "Order exceeded max slippage: 82000 > 81500"}]
+            }
+        }
+    }
+    executor.exchange = mock_exchange
+    executor.is_dry_run = False
+
+    setup = create_mock_setup(symbol="BTC")
+    res = executor.execute_trade(setup)
+    assert res["status"] == "error"
+    assert "Matching engine error" in res["error"]
+    # Ensure no SL or TP order was placed
+    mock_exchange.order.assert_not_called()
+

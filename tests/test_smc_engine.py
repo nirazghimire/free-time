@@ -17,6 +17,9 @@ from src.smc_engine import (
     EventType,
     SwingPoint,
     LiquiditySweep,
+    DemandZone,
+    ReactionConfirmation,
+    FairValueGap,
 )
 
 
@@ -511,5 +514,124 @@ def test_fair_value_gap_attached_to_timeframe_analysis():
     assert hasattr(analysis, "active_fvgs")
     assert len(analysis.active_fvgs) == 1
     assert analysis.active_fvgs[0].direction == TrendBias.BULLISH
+
+
+def test_detect_demand_zones_bullish_engulfing():
+    """Verify that a red candle followed by a bullish engulfing green candle creates a valid DemandZone."""
+    smc = SMCEngine()
+    # Candle 0: Red candle [open=105, high=106, low=98, close=100]
+    # Candle 1: Green engulfing candle [open=99, high=110, low=97, close=108] (close 108 >= open 105)
+    # Candle 2: Hold above zone [open=108, high=112, low=107, close=111]
+    data = [
+        [105, 106, 98, 100],  # 0: Bearish
+        [99, 110, 97, 108],   # 1: Bullish engulfing
+        [108, 112, 107, 111], # 2: Continues up
+    ]
+    df = create_candle_df(data)
+    zones = smc.detect_demand_zones(df, "1h")
+    assert len(zones) >= 1
+    zone = zones[0]
+    assert zone.direction == TrendBias.BULLISH
+    assert zone.top == 106.0  # Candle 0 high
+    assert zone.bottom == 97.0  # min(low 0, low 1) = 97.0
+    assert not zone.is_invalidated
+
+
+def test_detect_demand_zones_invalidation_on_body_close():
+    """Verify that a subsequent candle body close below zone bottom marks it invalidated."""
+    smc = SMCEngine()
+    data = [
+        [105, 106, 98, 100],  # 0: Bearish
+        [99, 110, 97, 108],   # 1: Bullish engulfing (bottom = 97)
+        [108, 109, 94, 95],   # 2: Candle body closes at 95 < bottom 97 -> Invalidation!
+    ]
+    df = create_candle_df(data)
+    zones = smc.detect_demand_zones(df, "1h")
+    bullish_zones = [z for z in zones if z.direction == TrendBias.BULLISH]
+    assert len(bullish_zones) == 0
+
+
+def test_detect_supply_zones_bearish_engulfing():
+    """Verify that a green candle followed by a bearish engulfing red candle creates a valid Supply Zone."""
+    smc = SMCEngine()
+    data = [
+        [100, 106, 99, 105],  # 0: Bullish
+        [106, 107, 95, 98],   # 1: Bearish engulfing (close 98 <= open 100)
+        [98, 99, 90, 92],     # 2: Continues down
+    ]
+    df = create_candle_df(data)
+    zones = smc.detect_demand_zones(df, "4h")
+    assert len(zones) >= 1
+    zone = zones[0]
+    assert zone.direction == TrendBias.BEARISH
+    assert zone.top == 107.0   # max(high 0, high 1)
+    assert zone.bottom == 99.0  # low of candle 0
+    assert not zone.is_invalidated
+
+
+def test_reaction_confirmation_rejection_wick():
+    """Verify that a candle tapping a demand zone and forming a lower wick >= 30% confirms a REJECTION_WICK."""
+    smc = SMCEngine()
+    # Zone: [95, 100]
+    zone = DemandZone(
+        direction=TrendBias.BULLISH,
+        top=100.0,
+        bottom=95.0,
+        candle_index=0,
+        timestamp=1700000000000,
+        timeframe="1h"
+    )
+    # Candle 0: Open=102, High=103, Low=96 (taps zone), Close=101
+    # Range = 103 - 96 = 7. Lower wick = min(102, 101) - 96 = 5.
+    # Wick ratio = 5 / 7 = 71.4% >= 30%
+    data = [
+        [104, 106, 103, 105],
+        [102, 103, 96, 101],  # Rejection wick tap
+    ]
+    df = create_candle_df(data)
+    reaction = smc.check_zone_and_fvg_tap_with_reaction(
+        df=df,
+        zones=[zone],
+        fvgs=[],
+        target_direction=TrendBias.BULLISH,
+        rejection_wick_ratio=0.30
+    )
+    assert reaction is not None
+    assert reaction.confirmed is True
+    assert reaction.reaction_type == "REJECTION_WICK"
+    assert reaction.reaction_price == 101.0
+    assert reaction.invalidation_level <= 95.0
+
+
+def test_reaction_confirmation_micro_bos():
+    """Verify that candle closing above previous candle's high confirms MICRO_BOS."""
+    smc = SMCEngine()
+    zone = DemandZone(
+        direction=TrendBias.BULLISH,
+        top=100.0,
+        bottom=95.0,
+        candle_index=0,
+        timestamp=1700000000000,
+        timeframe="15m"
+    )
+    # Candle 0: Dips into zone [101, 101, 98, 99]
+    # Candle 1: Strong bullish impulse closing above candle 0 high [99, 103, 99, 102]
+    data = [
+        [101, 101, 98, 99],
+        [99, 103, 99, 102],
+    ]
+    df = create_candle_df(data)
+    reaction = smc.check_zone_and_fvg_tap_with_reaction(
+        df=df,
+        zones=[zone],
+        fvgs=[],
+        target_direction=TrendBias.BULLISH,
+        rejection_wick_ratio=0.30
+    )
+    assert reaction is not None
+    assert reaction.confirmed is True
+    assert reaction.reaction_type == "MICRO_BOS"
+    assert reaction.reaction_price == 102.0
+
 
 

@@ -97,6 +97,7 @@ class OrderExecutor:
             "risk_reward": setup.risk_reward,
             "initial_sl": setup.stop_loss,
             "breakeven_triggered": False,
+            "sz_decimals": getattr(setup, "sz_decimals", 3),
             "entry_time": int(time.time() * 1000),
             "status": "OPEN",
             "pnl": 0.0,
@@ -144,6 +145,17 @@ class OrderExecutor:
                 err_msg = open_result.get("response", "Unknown error")
                 logger.error(f"[{symbol}] Market open REJECTED: {err_msg}")
                 return {"status": "error", "error": f"Market open rejected: {err_msg}"}
+
+            # Check if matching engine rejected or failed the IoC market order
+            resp_data = open_result.get("response", {}) if isinstance(open_result, dict) else {}
+            if isinstance(resp_data, dict):
+                inner_data = resp_data.get("data", {})
+                if isinstance(inner_data, dict):
+                    statuses = inner_data.get("statuses", [])
+                    if statuses and isinstance(statuses[0], dict) and "error" in statuses[0]:
+                        err_msg = statuses[0]["error"]
+                        logger.error(f"[{symbol}] Market open rejected by matching engine: {err_msg}")
+                        return {"status": "error", "error": f"Matching engine error: {err_msg}"}
 
             # 3. Stop Loss Order with retry + rollback
             sl_is_buy = not is_buy
@@ -216,6 +228,19 @@ class OrderExecutor:
                 # TP failure is not critical — SL already protects the position
                 logger.warning(f"[{symbol}] TP placement failed (SL is active): {tp_err}")
 
+            # Extract order IDs for clean lifecycle management
+            sl_oid = None
+            if isinstance(sl_result, dict):
+                st = sl_result.get("response", {}).get("data", {}).get("statuses", [])
+                if st and isinstance(st[0], dict):
+                    sl_oid = st[0].get("resting", {}).get("oid")
+
+            tp_oid = None
+            if isinstance(tp_result, dict):
+                st = tp_result.get("response", {}).get("data", {}).get("statuses", [])
+                if st and isinstance(st[0], dict):
+                    tp_oid = st[0].get("resting", {}).get("oid")
+
             record = {
                 "id": f"live_{int(time.time()*1000)}",
                 "symbol": symbol,
@@ -228,6 +253,9 @@ class OrderExecutor:
                 "risk_usd": setup.risk_usd,
                 "risk_reward": setup.risk_reward,
                 "initial_sl": sl_price,
+                "sl_oid": sl_oid,
+                "tp_oid": tp_oid,
+                "sz_decimals": getattr(setup, "sz_decimals", 3),
                 "breakeven_triggered": False,
                 "entry_time": int(time.time() * 1000),
                 "status": "OPEN",
@@ -287,7 +315,18 @@ class OrderExecutor:
                             "time": int(time.time() * 1000)
                         })
                         if pos.get("mode") == "LIVE" and self.exchange:
-                            self._update_live_stop_loss(symbol, is_buy=False, size=size, new_sl_px=entry)
+                            res = self._update_live_stop_loss(
+                                symbol,
+                                is_buy=False,
+                                size=size,
+                                new_sl_px=entry,
+                                sz_decimals=pos.get("sz_decimals", 3),
+                                old_sl_oid=pos.get("sl_oid")
+                            )
+                            if isinstance(res, dict):
+                                st = res.get("response", {}).get("data", {}).get("statuses", [])
+                                if st and isinstance(st[0], dict):
+                                    pos["sl_oid"] = st[0].get("resting", {}).get("oid")
                 elif direction == "BEARISH":
                     risk_dist = initial_sl - entry
                     if risk_dist > 0 and cur_px <= (entry - risk_dist):
@@ -305,7 +344,18 @@ class OrderExecutor:
                             "time": int(time.time() * 1000)
                         })
                         if pos.get("mode") == "LIVE" and self.exchange:
-                            self._update_live_stop_loss(symbol, is_buy=True, size=size, new_sl_px=entry)
+                            res = self._update_live_stop_loss(
+                                symbol,
+                                is_buy=True,
+                                size=size,
+                                new_sl_px=entry,
+                                sz_decimals=pos.get("sz_decimals", 3),
+                                old_sl_oid=pos.get("sl_oid")
+                            )
+                            if isinstance(res, dict):
+                                st = res.get("response", {}).get("data", {}).get("statuses", [])
+                                if st and isinstance(st[0], dict):
+                                    pos["sl_oid"] = st[0].get("resting", {}).get("oid")
 
             # --- Check SL / TP Trigger ---
             current_sl = pos["stop_loss"]
@@ -326,6 +376,8 @@ class OrderExecutor:
                         "exit_price": current_sl,
                         "mode": pos.get("mode", "PAPER")
                     })
+                    if pos.get("mode") == "LIVE":
+                        self.cancel_open_orders_for_symbol(symbol)
                     del self.paper_positions[symbol]
                 # Check hit TP
                 elif cur_px >= tp:
@@ -342,6 +394,8 @@ class OrderExecutor:
                         "exit_price": tp,
                         "mode": pos.get("mode", "PAPER")
                     })
+                    if pos.get("mode") == "LIVE":
+                        self.cancel_open_orders_for_symbol(symbol)
                     del self.paper_positions[symbol]
                 else:
                     pos["pnl"] = pnl
@@ -362,6 +416,8 @@ class OrderExecutor:
                         "exit_price": current_sl,
                         "mode": pos.get("mode", "PAPER")
                     })
+                    if pos.get("mode") == "LIVE":
+                        self.cancel_open_orders_for_symbol(symbol)
                     del self.paper_positions[symbol]
                 # Check hit TP
                 elif cur_px <= tp:
@@ -378,21 +434,40 @@ class OrderExecutor:
                         "exit_price": tp,
                         "mode": pos.get("mode", "PAPER")
                     })
+                    if pos.get("mode") == "LIVE":
+                        self.cancel_open_orders_for_symbol(symbol)
                     del self.paper_positions[symbol]
                 else:
                     pos["pnl"] = pnl
 
         return events
 
-    def _update_live_stop_loss(self, symbol: str, is_buy: bool, size: float, new_sl_px: float):
+    def _update_live_stop_loss(
+        self,
+        symbol: str,
+        is_buy: bool,
+        size: float,
+        new_sl_px: float,
+        sz_decimals: int = 3,
+        old_sl_oid: Optional[int] = None
+    ):
         """Update Stop Loss trigger order on Hyperliquid to breakeven."""
         if not self.exchange:
-            return
+            return None
         try:
             from src.risk_manager import format_hyperliquid_price
-            formatted_sl = format_hyperliquid_price(new_sl_px)
+            formatted_sl = format_hyperliquid_price(new_sl_px, sz_decimals=sz_decimals)
+
+            # Cancel previous SL trigger order if known to prevent duplicate resting stops
+            if old_sl_oid:
+                try:
+                    self.exchange.cancel(symbol, old_sl_oid)
+                    logger.info(f"[{symbol}] Cancelled initial SL order {old_sl_oid} before placing breakeven SL")
+                except Exception as c_err:
+                    logger.warning(f"[{symbol}] Note: could not cancel initial SL {old_sl_oid}: {c_err}")
+
             logger.info(f"[{symbol}] Updating live SL trigger order to breakeven @ ${formatted_sl:,.2f}...")
-            self.exchange.order(
+            return self.exchange.order(
                 name=symbol,
                 is_buy=is_buy,
                 sz=size,
@@ -408,6 +483,27 @@ class OrderExecutor:
             )
         except Exception as e:
             logger.warning(f"[{symbol}] Failed to update live SL to breakeven: {e}")
+            return None
+
+    def cancel_open_orders_for_symbol(self, symbol: str):
+        """Cancel all resting and trigger orders for a coin on Hyperliquid when position closes."""
+        if self.is_dry_run or not self.exchange:
+            return
+        try:
+            target_addr = self.account_address or self.config.account_address
+            if not target_addr:
+                return
+            from hyperliquid.info import Info
+            info = Info(self.config.api_url, skip_ws=True)
+            orders = info.frontend_open_orders(target_addr)
+            for o in orders:
+                if o.get("coin", "").upper() == symbol.upper():
+                    oid = o.get("oid")
+                    if oid:
+                        self.exchange.cancel(symbol.upper(), oid)
+                        logger.info(f"[{symbol}] Cancelled orphaned resting/trigger order {oid}")
+        except Exception as e:
+            logger.warning(f"[{symbol}] Error cancelling trigger orders on close: {e}")
 
     def reconcile_exchange_positions(
         self,
@@ -472,6 +568,7 @@ class OrderExecutor:
                     f"⚡ [EXCHANGE SYNC] {symbol} position closed on Hyperliquid ({status}) | "
                     f"Est. PnL: ${pnl:.2f}"
                 )
+                self.cancel_open_orders_for_symbol(symbol)
                 del self.paper_positions[symbol]
                 events.append({
                     "event": "POSITION_CLOSED_ON_EXCHANGE",
@@ -543,6 +640,7 @@ class OrderExecutor:
             else:
                 try:
                     res = self.exchange.market_close(symbol)
+                    self.cancel_open_orders_for_symbol(symbol)
                     self.paper_positions.pop(symbol, None)
                     results.append({"symbol": symbol, "status": "closed_live", "response": res})
                 except Exception as e:

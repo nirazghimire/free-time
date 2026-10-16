@@ -60,6 +60,8 @@ Trading with smaller balances ($10 to $20) requires precise position sizing on H
 - **Precision**: Dynamically queries Hyperliquid's `szDecimals` (e.g., 5 decimals for BTC, 4 for ETH, 2 for SOL) to format order sizes.
 - **Stop Loss**: Placed at `sweep.wick_extreme * (1 ± buffer)`.
 - **Take Profit**: Placed dynamically at a minimum `1:2.5` Risk-to-Reward ratio (or opposite swing liquidity).
+- **Max Positions Guard**: Configurable maximum concurrent positions (`MAX_OPEN_POSITIONS=1`) to prevent small balances from becoming overleveraged across multiple pairs.
+- **Anti-Chase Protection**: Discards 5M entry triggers if price has drifted more than 0.75% beyond the trigger candle close.
 
 ---
 
@@ -94,6 +96,7 @@ RISK_USD_PER_TRADE=1.00
 MIN_ORDER_NOTIONAL=11.0
 LEVERAGE=3
 TARGET_RR=2.5
+MAX_OPEN_POSITIONS=1
 ```
 
 > **Security Tip**: On Hyperliquid, navigate to **Account > API Agents** to generate an API Agent wallet. This lets you trade programmatically without exposing your main wallet private key!

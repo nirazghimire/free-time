@@ -5,7 +5,7 @@ Tests all risk scenarios, decimal rounding, and small balance edge cases.
 import pytest
 from config import BotConfig
 from src.risk_manager import RiskManager
-from src.smc_engine import TrendBias, LiquiditySweep, SwingPoint
+from src.smc_engine import TrendBias, LiquiditySweep, SwingPoint, DemandZone, ReactionConfirmation
 
 
 def test_calculate_trade_setup_long_success():
@@ -323,3 +323,41 @@ def test_strategy_discards_misaligned_intermediate_trend():
         "Trade setup must not be created when intermediate trend opposes macro bias"
     )
     assert result.is_aligned is False
+
+
+def test_calculate_trade_setup_demand_zone_success():
+    """Verify calculate_trade_setup works with anchor_sl_price and demand_zone."""
+    config = BotConfig(
+        risk_usd_per_trade=1.0,
+        min_order_notional=11.0,
+        leverage=3,
+        target_rr=2.5,
+        sl_buffer_pct=0.001
+    )
+    rm = RiskManager(config)
+    zone = DemandZone(
+        direction=TrendBias.BULLISH,
+        top=90000.0,
+        bottom=89500.0,
+        candle_index=1,
+        timestamp=1700000000000,
+        timeframe="1h"
+    )
+    setup = rm.calculate_trade_setup(
+        symbol="BTC",
+        direction=TrendBias.BULLISH,
+        entry_price=90200.0,
+        account_balance=20.0,
+        sz_decimals=5,
+        anchor_sl_price=89500.0,
+        demand_zone=zone
+    )
+    assert setup is not None
+    assert setup.direction == TrendBias.BULLISH
+    assert setup.entry_price == 90200.0
+    assert setup.stop_loss < 89500.0
+    assert setup.take_profit > 90200.0
+    assert setup.risk_reward >= 2.4
+    assert setup.size > 0
+    assert setup.notional_usd >= 10.5
+

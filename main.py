@@ -67,11 +67,7 @@ async def async_main():
     # Start Dashboard Server
     await dashboard.start()
 
-    # Perform initial scan immediately
-    logger.info("Executing initial market scan...")
-    await asyncio.to_thread(bot.scan_once)
-
-    # Start periodic scanning loop
+    # Start periodic scanning loop (executes initial scan immediately on entry)
     try:
         await bot.run_loop(interval_seconds=args.scan_interval)
     except asyncio.CancelledError:

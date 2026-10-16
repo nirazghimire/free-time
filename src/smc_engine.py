@@ -71,6 +71,30 @@ class FairValueGap:
 
 
 @dataclass
+class DemandZone:
+    direction: TrendBias  # BULLISH (Demand / Support) or BEARISH (Supply / Resistance)
+    top: float  # Upper boundary of zone
+    bottom: float  # Lower boundary of zone
+    candle_index: int  # Index of base candle
+    timestamp: int  # Milliseconds timestamp
+    timeframe: str  # e.g., "4h", "1h", "15m", "5m"
+    is_mitigated: bool = False  # True once price taps into it
+    is_invalidated: bool = False  # True if candle body closes through the zone
+    mitigation_count: int = 0
+
+
+@dataclass
+class ReactionConfirmation:
+    confirmed: bool
+    reaction_type: str  # "REJECTION_WICK", "ENGULFING_BOUNCE", "MICRO_BOS"
+    reaction_price: float
+    invalidation_level: float  # Extreme wick / zone floor for Stop Loss
+    timestamp: int
+    zone: Optional[DemandZone] = None
+    fvg: Optional[FairValueGap] = None
+
+
+@dataclass
 class TimeframeAnalysis:
     symbol: str
     timeframe: str
@@ -82,6 +106,7 @@ class TimeframeAnalysis:
     recent_sweeps: List[LiquiditySweep] = field(default_factory=list)
     swing_highs: List[SwingPoint] = field(default_factory=list)
     swing_lows: List[SwingPoint] = field(default_factory=list)
+    active_demand_zones: List[DemandZone] = field(default_factory=list)
     active_fvgs: List[FairValueGap] = field(default_factory=list)
     total_candles: int = 0
     latest_timestamp: int = 0
@@ -180,11 +205,14 @@ class SMCEngine:
         if not swing_highs and not swing_lows:
             all_fvgs = self.detect_fair_value_gaps(df)
             active_fvgs = [f for f in all_fvgs if not f.mitigated]
+            all_zones = self.detect_demand_zones(df, timeframe)
+            active_zones = [z for z in all_zones if not z.is_invalidated]
             return TimeframeAnalysis(
                 symbol=symbol,
                 timeframe=timeframe,
                 bias=TrendBias.NEUTRAL,
                 current_price=current_price,
+                active_demand_zones=active_zones[-10:],
                 active_fvgs=active_fvgs[-10:],
                 total_candles=len(df),
                 latest_timestamp=int(df["timestamp"].iloc[-1]) if ("timestamp" in df.columns and len(df) > 0) else 0
@@ -324,6 +352,10 @@ class SMCEngine:
         all_fvgs = self.detect_fair_value_gaps(df)
         active_fvgs = [f for f in all_fvgs if not f.mitigated]
 
+        # Detect active Demand and Supply Zones
+        all_zones = self.detect_demand_zones(df, timeframe)
+        active_zones = [z for z in all_zones if not z.is_invalidated]
+
         return TimeframeAnalysis(
             symbol=symbol,
             timeframe=timeframe,
@@ -335,6 +367,7 @@ class SMCEngine:
             recent_sweeps=sweeps[-10:],
             swing_highs=swing_highs[-15:],
             swing_lows=swing_lows[-15:],
+            active_demand_zones=active_zones[-10:],
             active_fvgs=active_fvgs[-10:],
             total_candles=len(df),
             latest_timestamp=int(timestamps[-1]) if len(timestamps) > 0 else 0
@@ -387,7 +420,7 @@ class SMCEngine:
         self,
         analysis_5m: TimeframeAnalysis,
         active_sweep: LiquiditySweep,
-        max_lookback_candles: int = 8
+        max_lookback_candles: int = 3
     ) -> Optional[StructureEvent]:
         """
         Check if a 5m Break of Structure (BOS) or CHoCH occurred in the direction of the 15m sweep,
@@ -438,8 +471,9 @@ class SMCEngine:
         timestamps = df["timestamp"].values
         n = len(df)
         fvgs: List[FairValueGap] = []
+        start_idx = max(2, n - 60)
 
-        for i in range(2, n):
+        for i in range(start_idx, n):
             # Bullish FVG: candle i low > candle i-2 high
             if lows[i] > highs[i - 2]:
                 bottom = float(highs[i - 2])
@@ -485,4 +519,281 @@ class SMCEngine:
                     ))
 
         return fvgs
+
+    def detect_demand_zones(
+        self,
+        df: pd.DataFrame,
+        timeframe: str,
+        max_age_candles: int = 50
+    ) -> List[DemandZone]:
+        """
+        Detect Demand and Supply Zones (Engulfing Order Blocks).
+        - Bullish Engulfing Demand Zone:
+            Candle i-1 is bearish (close < open).
+            Candle i is bullish (close > open).
+            Engulfing condition: candle i close >= candle i-1 open.
+            Zone Top: candle i-1 high (full range of origin candle).
+            Zone Bottom: min(candle i-1 low, candle i low).
+        - Bearish Engulfing Supply Zone:
+            Candle i-1 is bullish (close > open).
+            Candle i is bearish (close < open).
+            Engulfing condition: candle i close <= candle i-1 open.
+            Zone Top: max(candle i-1 high, candle i high).
+            Zone Bottom: candle i-1 low.
+        - Invalidation: A subsequent candle body close beyond the zone invalidates it.
+        - Mitigation: A subsequent candle wick piercing into the zone marks it mitigated.
+        """
+        if len(df) < 2:
+            return []
+
+        opens = df["open"].values
+        highs = df["high"].values
+        lows = df["low"].values
+        closes = df["close"].values
+        timestamps = df["timestamp"].values if "timestamp" in df.columns else [0] * len(df)
+        n = len(df)
+
+        zones: List[DemandZone] = []
+        start_idx = max(1, n - max_age_candles)
+
+        for i in range(start_idx, n):
+            # Bullish Engulfing (Demand Zone)
+            if closes[i - 1] < opens[i - 1] and closes[i] > opens[i]:
+                if closes[i] >= opens[i - 1]:
+                    top = float(highs[i - 1])
+                    bottom = float(min(lows[i - 1], lows[i]))
+                    zone = DemandZone(
+                        direction=TrendBias.BULLISH,
+                        top=top,
+                        bottom=bottom,
+                        candle_index=i,
+                        timestamp=int(timestamps[i]),
+                        timeframe=timeframe,
+                        is_mitigated=False,
+                        is_invalidated=False,
+                        mitigation_count=0
+                    )
+                    # Forward-walk to verify invalidation & mitigation status
+                    for j in range(i + 1, n):
+                        if closes[j] < zone.bottom:
+                            zone.is_invalidated = True
+                            break
+                        if lows[j] <= zone.top:
+                            zone.is_mitigated = True
+                            zone.mitigation_count += 1
+
+                    if not zone.is_invalidated:
+                        zones.append(zone)
+
+            # Bearish Engulfing (Supply Zone)
+            elif closes[i - 1] > opens[i - 1] and closes[i] < opens[i]:
+                if closes[i] <= opens[i - 1]:
+                    top = float(max(highs[i - 1], highs[i]))
+                    bottom = float(lows[i - 1])
+                    zone = DemandZone(
+                        direction=TrendBias.BEARISH,
+                        top=top,
+                        bottom=bottom,
+                        candle_index=i,
+                        timestamp=int(timestamps[i]),
+                        timeframe=timeframe,
+                        is_mitigated=False,
+                        is_invalidated=False,
+                        mitigation_count=0
+                    )
+                    # Forward-walk to verify invalidation & mitigation status
+                    for j in range(i + 1, n):
+                        if closes[j] > zone.top:
+                            zone.is_invalidated = True
+                            break
+                        if highs[j] >= zone.bottom:
+                            zone.is_mitigated = True
+                            zone.mitigation_count += 1
+
+                    if not zone.is_invalidated:
+                        zones.append(zone)
+
+        return zones
+
+    def check_zone_and_fvg_tap_with_reaction(
+        self,
+        df: pd.DataFrame,
+        zones: List[DemandZone],
+        fvgs: List[FairValueGap],
+        target_direction: TrendBias,
+        lookback_candles: int = 5,
+        rejection_wick_ratio: float = 0.30
+    ) -> Optional[ReactionConfirmation]:
+        """
+        Check if recent candles on lower timeframe tapped into an active Demand Zone or FVG
+        and produced a confirmed reaction (rejection wick, engulfing bounce, or micro-BOS).
+        """
+        if len(df) < 2:
+            return None
+
+        opens = df["open"].values
+        highs = df["high"].values
+        lows = df["low"].values
+        closes = df["close"].values
+        timestamps = df["timestamp"].values if "timestamp" in df.columns else [0] * len(df)
+        n = len(df)
+
+        valid_zones = [z for z in zones if z.direction == target_direction and not z.is_invalidated]
+        valid_fvgs = [f for f in fvgs if f.direction == target_direction and not f.mitigated]
+
+        if not valid_zones and not valid_fvgs:
+            return None
+
+        # Inspect the most recent `lookback_candles`
+        start_idx = max(1, n - lookback_candles)
+
+        for i in range(start_idx, n):
+            c_open = opens[i]
+            c_high = highs[i]
+            c_low = lows[i]
+            c_close = closes[i]
+            c_time = int(timestamps[i])
+            c_range = c_high - c_low
+
+            # 1. Bullish Setup (Long)
+            if target_direction == TrendBias.BULLISH:
+                tapped_zone = None
+                for z in valid_zones:
+                    if c_low <= z.top and c_close >= z.bottom:
+                        tapped_zone = z
+                        break
+
+                tapped_fvg = None
+                for f in valid_fvgs:
+                    if c_low <= f.top and c_close >= f.bottom:
+                        tapped_fvg = f
+                        break
+
+                if not tapped_zone and not tapped_fvg:
+                    continue
+
+                anchor_low = c_low
+                if tapped_zone:
+                    anchor_low = min(anchor_low, tapped_zone.bottom)
+                if tapped_fvg:
+                    anchor_low = min(anchor_low, tapped_fvg.bottom)
+
+                # Rejection Wick
+                if c_range > 0:
+                    lower_wick = min(c_open, c_close) - c_low
+                    wick_ratio = lower_wick / c_range
+                    if wick_ratio >= rejection_wick_ratio and c_close > c_low:
+                        return ReactionConfirmation(
+                            confirmed=True,
+                            reaction_type="REJECTION_WICK",
+                            reaction_price=c_close,
+                            invalidation_level=anchor_low,
+                            timestamp=c_time,
+                            zone=tapped_zone,
+                            fvg=tapped_fvg
+                        )
+
+                # Micro-BOS (candle body closes strictly beyond previous candle high)
+                if c_close > highs[i - 1] and c_close > c_open:
+                    return ReactionConfirmation(
+                        confirmed=True,
+                        reaction_type="MICRO_BOS",
+                        reaction_price=c_close,
+                        invalidation_level=anchor_low,
+                        timestamp=c_time,
+                        zone=tapped_zone,
+                        fvg=tapped_fvg
+                    )
+
+                # Engulfing Bounce (candle i-1 tapped, candle i is bullish engulfing)
+                prev_low = lows[i - 1]
+                prev_open = opens[i - 1]
+                prev_tapped = False
+                if tapped_zone and prev_low <= tapped_zone.top:
+                    prev_tapped = True
+                if tapped_fvg and prev_low <= tapped_fvg.top:
+                    prev_tapped = True
+
+                if prev_tapped and c_close > c_open and c_close >= prev_open:
+                    return ReactionConfirmation(
+                        confirmed=True,
+                        reaction_type="ENGULFING_BOUNCE",
+                        reaction_price=c_close,
+                        invalidation_level=min(anchor_low, prev_low),
+                        timestamp=c_time,
+                        zone=tapped_zone,
+                        fvg=tapped_fvg
+                    )
+
+            # 2. Bearish Setup (Short)
+            elif target_direction == TrendBias.BEARISH:
+                tapped_zone = None
+                for z in valid_zones:
+                    if c_high >= z.bottom and c_close <= z.top:
+                        tapped_zone = z
+                        break
+
+                tapped_fvg = None
+                for f in valid_fvgs:
+                    if c_high >= f.bottom and c_close <= f.top:
+                        tapped_fvg = f
+                        break
+
+                if not tapped_zone and not tapped_fvg:
+                    continue
+
+                anchor_high = c_high
+                if tapped_zone:
+                    anchor_high = max(anchor_high, tapped_zone.top)
+                if tapped_fvg:
+                    anchor_high = max(anchor_high, tapped_fvg.top)
+
+                # Rejection Wick
+                if c_range > 0:
+                    upper_wick = c_high - max(c_open, c_close)
+                    wick_ratio = upper_wick / c_range
+                    if wick_ratio >= rejection_wick_ratio and c_close < c_high:
+                        return ReactionConfirmation(
+                            confirmed=True,
+                            reaction_type="REJECTION_WICK",
+                            reaction_price=c_close,
+                            invalidation_level=anchor_high,
+                            timestamp=c_time,
+                            zone=tapped_zone,
+                            fvg=tapped_fvg
+                        )
+
+                # Micro-BOS (candle body closes strictly beyond previous candle low)
+                if c_close < lows[i - 1] and c_close < c_open:
+                    return ReactionConfirmation(
+                        confirmed=True,
+                        reaction_type="MICRO_BOS",
+                        reaction_price=c_close,
+                        invalidation_level=anchor_high,
+                        timestamp=c_time,
+                        zone=tapped_zone,
+                        fvg=tapped_fvg
+                    )
+
+                # Engulfing Bounce
+                prev_high = highs[i - 1]
+                prev_open = opens[i - 1]
+                prev_tapped = False
+                if tapped_zone and prev_high >= tapped_zone.bottom:
+                    prev_tapped = True
+                if tapped_fvg and prev_high >= tapped_fvg.bottom:
+                    prev_tapped = True
+
+                if prev_tapped and c_close < c_open and c_close <= prev_open:
+                    return ReactionConfirmation(
+                        confirmed=True,
+                        reaction_type="ENGULFING_BOUNCE",
+                        reaction_price=c_close,
+                        invalidation_level=max(anchor_high, prev_high),
+                        timestamp=c_time,
+                        zone=tapped_zone,
+                        fvg=tapped_fvg
+                    )
+
+        return None
 

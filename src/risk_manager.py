@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional, Tuple
 from config import BotConfig
-from src.smc_engine import TrendBias, LiquiditySweep
+from src.smc_engine import TrendBias, LiquiditySweep, DemandZone, ReactionConfirmation
 
 logger = logging.getLogger("risk_manager")
 
@@ -30,10 +30,13 @@ class TradeSetup:
     notional_usd: float
     risk_usd: float
     sl_distance_pct: float
-    sweep: LiquiditySweep
+    sweep: Optional[LiquiditySweep] = None
+    demand_zone: Optional[DemandZone] = None
+    reaction: Optional[ReactionConfirmation] = None
+    sz_decimals: int = 3
 
 
-def format_hyperliquid_price(px: float, sz_decimals: int) -> float:
+def format_hyperliquid_price(px: float, sz_decimals: int = 3) -> float:
     """Format price according to Hyperliquid perpetual tick rules:
     Max 5 significant figures and max (6 - sz_decimals) decimal places.
     """
@@ -52,12 +55,16 @@ class RiskManager:
         symbol: str,
         direction: TrendBias,
         entry_price: float,
-        sweep: LiquiditySweep,
-        account_balance: float,
-        sz_decimals: int
+        sweep: Optional[LiquiditySweep] = None,
+        account_balance: float = 15.0,
+        sz_decimals: int = 3,
+        anchor_sl_price: Optional[float] = None,
+        demand_zone: Optional[DemandZone] = None,
+        reaction: Optional[ReactionConfirmation] = None,
     ) -> Optional[TradeSetup]:
         """
         Calculate entry, SL, TP, and position size.
+        Supports both 15M Liquidity Sweeps and Demand Zone / Reaction entries.
         Returns TradeSetup if valid, else None.
         """
         if entry_price <= 0:
@@ -66,11 +73,25 @@ class RiskManager:
         # Effective account equity (fallback to $15 for simulation if balance query returned 0)
         usable_balance = account_balance if account_balance > 0 else 15.0
 
+        # Determine anchor price for Stop Loss:
+        # 1. Direct anchor_sl_price (from reaction confirmation / extreme low)
+        # 2. Or sweep.wick_extreme
+        # 3. Or demand_zone bottom (bullish) / top (bearish)
+        sl_anchor = anchor_sl_price
+        if sl_anchor is None and sweep is not None:
+            sl_anchor = sweep.wick_extreme
+        elif sl_anchor is None and demand_zone is not None:
+            sl_anchor = demand_zone.bottom if direction == TrendBias.BULLISH else demand_zone.top
+
+        if sl_anchor is None:
+            logger.warning(f"[{symbol}] No valid SL anchor provided (need sweep, anchor_sl_price, or demand_zone)")
+            return None
+
         # 1. Stop Loss Calculation
         buffer = self.config.sl_buffer_pct
         if direction == TrendBias.BULLISH:
-            # For LONG, SL is set below the 15m sweep low wick
-            stop_loss = sweep.wick_extreme * (1.0 - buffer)
+            # For LONG, SL is set below the anchor low
+            stop_loss = sl_anchor * (1.0 - buffer)
             if stop_loss >= entry_price:
                 logger.warning(f"[{symbol}] Invalid Long SL: SL ({stop_loss}) >= Entry ({entry_price})")
                 return None
@@ -78,8 +99,8 @@ class RiskManager:
             sl_distance_pct = sl_distance / entry_price
             take_profit = entry_price + (sl_distance * self.config.target_rr)
         else:
-            # For SHORT, SL is set above the 15m sweep high wick
-            stop_loss = sweep.wick_extreme * (1.0 + buffer)
+            # For SHORT, SL is set above the anchor high
+            stop_loss = sl_anchor * (1.0 + buffer)
             if stop_loss <= entry_price:
                 logger.warning(f"[{symbol}] Invalid Short SL: SL ({stop_loss}) <= Entry ({entry_price})")
                 return None
@@ -88,7 +109,7 @@ class RiskManager:
             take_profit = entry_price - (sl_distance * self.config.target_rr)
 
         # 2. Risk Sizing
-        # Risk amount: user-defined fixed USD or 5% of balance, whichever is smaller
+        # Risk amount: user-defined fixed USD or 10% of balance, whichever is smaller
         risk_usd = min(self.config.risk_usd_per_trade, usable_balance * 0.10)
         if risk_usd <= 0.20:
             risk_usd = 0.50  # sensible minimum floor for testing
@@ -158,5 +179,8 @@ class RiskManager:
             notional_usd=round(actual_notional, 2),
             risk_usd=round(actual_risk_usd, 2),
             sl_distance_pct=round(sl_distance_pct * 100, 2),
-            sweep=sweep
+            sweep=sweep,
+            demand_zone=demand_zone,
+            reaction=reaction,
+            sz_decimals=sz_decimals
         )
