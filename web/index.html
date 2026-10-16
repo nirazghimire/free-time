@@ -44,6 +44,13 @@
           Scan Now
         </button>
 
+        <button class="action-btn backtest-btn" id="openBacktestBtn" title="Run Strategy Backtest">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 3v18h18M7 16l4-4 4 4 6-6"/>
+          </svg>
+          Backtest
+        </button>
+
         <button class="action-btn danger-btn" id="closeAllBtn" title="Emergency Close All">
           Emergency Close
         </button>
@@ -197,6 +204,59 @@
     <footer class="app-footer">
       <p>Hyperliquid Multi-Timeframe SMC Trading Bot &bull; Python SDK EIP-712 Engine &bull; Testnet & Mainnet Ready</p>
     </footer>
+  </div>
+
+  <!-- Backtest Modal Overlay -->
+  <div class="modal-overlay" id="backtestModal" style="display:none;">
+    <div class="modal-content glass-card">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span class="icon">⚡</span>
+          <h3>Strategy Backtest Simulator</h3>
+        </div>
+        <button class="close-modal" id="closeBacktestBtn">&times;</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="backtest-form-row">
+          <div class="form-group">
+            <label for="btSymbol">Asset</label>
+            <select id="btSymbol" class="custom-select">
+              <option value="BTC" selected>BTC</option>
+              <option value="ETH">ETH</option>
+              <option value="SOL">SOL</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="btDays">Period</label>
+            <select id="btDays" class="custom-select">
+              <option value="7">7 Days</option>
+              <option value="14">14 Days</option>
+              <option value="30" selected>30 Days (1 Month)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="btBalance">Initial Balance ($)</label>
+            <input type="number" id="btBalance" class="custom-input" value="20.0" step="5" min="10" max="1000">
+          </div>
+
+          <button class="action-btn scan-btn" id="runBacktestBtn" style="height:38px; align-self:flex-end;">
+            Run Simulation
+          </button>
+        </div>
+
+        <div id="btLoading" style="display:none;" class="bt-loading-state">
+          <div class="spinner"></div>
+          <p>Replaying multi-timeframe candles with zero lookahead bias... Please wait (10-20s)</p>
+        </div>
+
+        <div id="btResults" style="display:none;" class="bt-results-container">
+          <!-- Dynamic metrics injected by app.js -->
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="/static/app.js"></script>

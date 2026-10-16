@@ -351,8 +351,165 @@ clearLogsBtn.addEventListener("click", () => {
   terminalLogs.innerHTML = "";
 });
 
+// Backtest Modal Controls
+const backtestModal = document.getElementById("backtestModal");
+const openBacktestBtn = document.getElementById("openBacktestBtn");
+const closeBacktestBtn = document.getElementById("closeBacktestBtn");
+const runBacktestBtn = document.getElementById("runBacktestBtn");
+const btSymbol = document.getElementById("btSymbol");
+const btDays = document.getElementById("btDays");
+const btBalance = document.getElementById("btBalance");
+const btLoading = document.getElementById("btLoading");
+const btResults = document.getElementById("btResults");
+
+if (openBacktestBtn) {
+  openBacktestBtn.addEventListener("click", () => {
+    backtestModal.style.display = "flex";
+  });
+}
+
+if (closeBacktestBtn) {
+  closeBacktestBtn.addEventListener("click", () => {
+    backtestModal.style.display = "none";
+  });
+}
+
+if (backtestModal) {
+  backtestModal.addEventListener("click", (e) => {
+    if (e.target === backtestModal) {
+      backtestModal.style.display = "none";
+    }
+  });
+}
+
+if (runBacktestBtn) {
+  runBacktestBtn.addEventListener("click", async () => {
+    const symbol = btSymbol.value;
+    const days = parseInt(btDays.value);
+    const balance = parseFloat(btBalance.value) || 20.0;
+
+    btLoading.style.display = "flex";
+    btResults.style.display = "none";
+    runBacktestBtn.disabled = true;
+    runBacktestBtn.style.opacity = "0.6";
+
+    addLog("system", `Starting ${days}-day backtest simulation for ${symbol} ($${balance.toFixed(2)} balance)...`);
+
+    try {
+      const res = await fetch("/api/backtest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol, days, balance })
+      });
+      const data = await res.json();
+
+      if (data.status === "success" && data.result) {
+        renderBacktestResults(data.result);
+        addLog("system", `Backtest complete for ${symbol}: Profit Factor=${data.result.profit_factor}, PnL=$${data.result.net_profit_usd} (${data.result.net_profit_pct}%)`);
+      } else {
+        btResults.innerHTML = `<div style="color:#fb7185; padding:16px;">Backtest failed: ${data.message || 'Unknown error'}</div>`;
+        btResults.style.display = "block";
+      }
+    } catch (e) {
+      btResults.innerHTML = `<div style="color:#fb7185; padding:16px;">Request failed: ${e.message}</div>`;
+      btResults.style.display = "block";
+    } finally {
+      btLoading.style.display = "none";
+      runBacktestBtn.disabled = false;
+      runBacktestBtn.style.opacity = "1";
+    }
+  });
+}
+
+function renderBacktestResults(r) {
+  const pnlClass = r.net_profit_usd >= 0 ? "text-emerald-400" : "text-rose-400";
+  const pnlPrefix = r.net_profit_usd >= 0 ? "+" : "";
+
+  let tradesHtml = "";
+  if (r.trades && r.trades.length > 0) {
+    tradesHtml = `
+      <div style="margin-top:20px;">
+        <h4 style="font-size:0.9rem; color:var(--text-muted); margin-bottom:8px;">Recent Simulated Trades</h4>
+        <div style="overflow-x:auto;">
+          <table class="bt-trades-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Side</th>
+                <th>Entry Px</th>
+                <th>Exit Px</th>
+                <th>Outcome</th>
+                <th>Net PnL</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${r.trades.map(t => {
+                const outcomeColor = t.status === "CLOSED_TP" ? "#34d399" : (t.status === "CLOSED_SL" ? "#f87171" : "#a855f7");
+                const tPnlPrefix = t.net_pnl >= 0 ? "+" : "";
+                const tPnlColor = t.net_pnl >= 0 ? "#34d399" : "#f87171";
+                return `
+                  <tr>
+                    <td>${t.id}</td>
+                    <td style="color:${t.direction === 'BULLISH' ? '#34d399' : '#f87171'}; font-weight:600;">${t.direction}</td>
+                    <td>$${t.entry_price.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                    <td>$${t.exit_price.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                    <td><span style="color:${outcomeColor}; font-size:0.75rem; font-weight:600;">${t.status}</span></td>
+                    <td style="color:${tPnlColor}; font-weight:600;">${tPnlPrefix}$${t.net_pnl.toFixed(2)}</td>
+                  </tr>
+                `;
+              }).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  btResults.innerHTML = `
+    <div class="bt-metrics-grid">
+      <div class="bt-metric-card">
+        <div class="bt-metric-label">Final Equity</div>
+        <div class="bt-metric-val" style="color:#38bdf8;">$${r.final_equity.toFixed(2)}</div>
+      </div>
+      <div class="bt-metric-card">
+        <div class="bt-metric-label">Net Profit</div>
+        <div class="bt-metric-val" style="color:${r.net_profit_usd >= 0 ? '#34d399' : '#f87171'};">
+          ${pnlPrefix}$${r.net_profit_usd.toFixed(2)} (${pnlPrefix}${r.net_profit_pct.toFixed(1)}%)
+        </div>
+      </div>
+      <div class="bt-metric-card">
+        <div class="bt-metric-label">Profit Factor</div>
+        <div class="bt-metric-val" style="color:${r.profit_factor >= 1.0 ? '#34d399' : '#f87171'};">${r.profit_factor.toFixed(2)}</div>
+      </div>
+      <div class="bt-metric-card">
+        <div class="bt-metric-label">Win Rate</div>
+        <div class="bt-metric-val">${r.win_rate_pct.toFixed(1)}% (${r.winning_trades}/${r.total_trades})</div>
+      </div>
+      <div class="bt-metric-card">
+        <div class="bt-metric-label">Max Drawdown</div>
+        <div class="bt-metric-val" style="color:#f87171;">-${r.max_drawdown_pct.toFixed(1)}%</div>
+      </div>
+      <div class="bt-metric-card">
+        <div class="bt-metric-label">Breakeven Trades</div>
+        <div class="bt-metric-val" style="color:#c084fc;">${r.breakeven_trades}</div>
+      </div>
+      <div class="bt-metric-card">
+        <div class="bt-metric-label">Avg Win / Loss</div>
+        <div class="bt-metric-val" style="font-size:0.95rem;">+$${r.avg_win_usd.toFixed(2)} / -$${r.avg_loss_usd.toFixed(2)}</div>
+      </div>
+      <div class="bt-metric-card">
+        <div class="bt-metric-label">Avg Target R:R</div>
+        <div class="bt-metric-val">1:${r.avg_risk_reward.toFixed(1)}</div>
+      </div>
+    </div>
+    ${tradesHtml}
+  `;
+  btResults.style.display = "block";
+}
+
 // Boot
 window.addEventListener("DOMContentLoaded", () => {
   initWebSocket();
   fetchSnapshot();
 });
+

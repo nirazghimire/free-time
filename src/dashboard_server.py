@@ -34,6 +34,7 @@ class DashboardServer:
         self.app.router.add_post("/api/toggle_autotrade", self.handle_toggle_autotrade)
         self.app.router.add_post("/api/toggle_dryrun", self.handle_toggle_dryrun)
         self.app.router.add_post("/api/close_all", self.handle_close_all)
+        self.app.router.add_post("/api/backtest", self.handle_backtest)
         self.app.router.add_get("/ws", self.handle_websocket)
 
         # Static files
@@ -78,6 +79,74 @@ class DashboardServer:
         res = self.bot.executor.close_all_positions()
         self.bot.broadcast_event("POSITIONS_CLOSED", res)
         return web.json_response({"status": "success", "results": res})
+
+    async def handle_backtest(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        symbol = str(body.get("symbol", "BTC")).upper()
+        days = int(body.get("days", 14))
+        balance = float(body.get("balance", 20.0))
+
+        import asyncio
+        import time
+        from src.backtester import BacktestEngine
+
+        def _run():
+            engine = BacktestEngine(self.bot.config)
+            now_ms = int(time.time() * 1000)
+            start_ms = now_ms - (days * 24 * 3600 * 1000)
+            candles_by_tf = {}
+            for tf in ["1w", "1d", "4h", "1h", "15m", "5m"]:
+                tf_start = start_ms
+                if tf in ("1w", "1d"):
+                    tf_start = now_ms - (180 * 24 * 3600 * 1000)
+                elif tf in ("4h", "1h"):
+                    tf_start = now_ms - (45 * 24 * 3600 * 1000)
+                candles_by_tf[tf] = engine.fetch_historical_candles_chunked(symbol, tf, tf_start, now_ms)
+
+            res = engine.run_backtest(symbol, candles_by_tf, initial_balance=balance)
+            return {
+                "symbol": res.symbol,
+                "days": days,
+                "initial_balance": res.initial_balance,
+                "final_equity": round(res.final_equity, 2),
+                "net_profit_usd": round(res.net_profit_usd, 2),
+                "net_profit_pct": round(res.net_profit_pct, 2),
+                "total_trades": res.total_trades,
+                "winning_trades": res.winning_trades,
+                "losing_trades": res.losing_trades,
+                "breakeven_trades": res.breakeven_trades,
+                "win_rate_pct": round(res.win_rate_pct, 1),
+                "profit_factor": round(res.profit_factor, 2),
+                "max_drawdown_usd": round(res.max_drawdown_usd, 2),
+                "max_drawdown_pct": round(res.max_drawdown_pct, 2),
+                "avg_win_usd": round(res.avg_win_usd, 2),
+                "avg_loss_usd": round(res.avg_loss_usd, 2),
+                "avg_risk_reward": round(res.avg_risk_reward, 2),
+                "trades": [
+                    {
+                        "id": t.id,
+                        "direction": t.direction,
+                        "entry_price": round(t.entry_price, 2),
+                        "exit_price": round(t.exit_price, 2),
+                        "stop_loss": round(t.stop_loss, 2),
+                        "take_profit": round(t.take_profit, 2),
+                        "status": t.status,
+                        "net_pnl": round(t.net_pnl, 2),
+                    }
+                    for t in res.trades[-15:]
+                ]
+            }
+
+        try:
+            result_data = await asyncio.to_thread(_run)
+            return web.json_response({"status": "success", "result": result_data})
+        except Exception as e:
+            logger.error(f"Error during dashboard backtest: {e}")
+            return web.json_response({"status": "error", "message": str(e)}, status=500)
 
     async def handle_websocket(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse()
