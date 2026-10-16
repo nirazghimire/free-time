@@ -60,6 +60,17 @@ class LiquiditySweep:
 
 
 @dataclass
+class FairValueGap:
+    direction: TrendBias  # BULLISH or BEARISH
+    top: float
+    bottom: float
+    candle_index: int
+    timestamp: int
+    mitigated: bool = False
+    size_pct: float = 0.0
+
+
+@dataclass
 class TimeframeAnalysis:
     symbol: str
     timeframe: str
@@ -71,6 +82,7 @@ class TimeframeAnalysis:
     recent_sweeps: List[LiquiditySweep] = field(default_factory=list)
     swing_highs: List[SwingPoint] = field(default_factory=list)
     swing_lows: List[SwingPoint] = field(default_factory=list)
+    active_fvgs: List[FairValueGap] = field(default_factory=list)
     total_candles: int = 0
     latest_timestamp: int = 0
 
@@ -166,11 +178,16 @@ class SMCEngine:
         swing_highs, swing_lows = self.find_swing_points(df)
 
         if not swing_highs and not swing_lows:
+            all_fvgs = self.detect_fair_value_gaps(df)
+            active_fvgs = [f for f in all_fvgs if not f.mitigated]
             return TimeframeAnalysis(
                 symbol=symbol,
                 timeframe=timeframe,
                 bias=TrendBias.NEUTRAL,
-                current_price=current_price
+                current_price=current_price,
+                active_fvgs=active_fvgs[-10:],
+                total_candles=len(df),
+                latest_timestamp=int(df["timestamp"].iloc[-1]) if ("timestamp" in df.columns and len(df) > 0) else 0
             )
 
         # Merge swings chronologically
@@ -303,6 +320,10 @@ class SMCEngine:
         if final_bias == TrendBias.NEUTRAL and events:
             final_bias = events[-1].direction
 
+        # Detect unmitigated Fair Value Gaps
+        all_fvgs = self.detect_fair_value_gaps(df)
+        active_fvgs = [f for f in all_fvgs if not f.mitigated]
+
         return TimeframeAnalysis(
             symbol=symbol,
             timeframe=timeframe,
@@ -314,6 +335,7 @@ class SMCEngine:
             recent_sweeps=sweeps[-10:],
             swing_highs=swing_highs[-15:],
             swing_lows=swing_lows[-15:],
+            active_fvgs=active_fvgs[-10:],
             total_candles=len(df),
             latest_timestamp=int(timestamps[-1]) if len(timestamps) > 0 else 0
         )
@@ -396,4 +418,71 @@ class SMCEngine:
                 return event
 
         return None
+
+    def detect_fair_value_gaps(
+        self,
+        df: pd.DataFrame,
+        min_gap_pct: float = 0.01
+    ) -> List[FairValueGap]:
+        """
+        Detect 3-candle Fair Value Gaps (FVG) and track unmitigated imbalances.
+        - Bullish FVG: Low[i] > High[i-2]. Imbalance zone: [High[i-2], Low[i]].
+        - Bearish FVG: High[i] < Low[i-2]. Imbalance zone: [High[i], Low[i-2]].
+        A gap is marked mitigated if any subsequent candle wick pierces through the zone.
+        """
+        if len(df) < 3:
+            return []
+
+        highs = df["high"].values
+        lows = df["low"].values
+        timestamps = df["timestamp"].values
+        n = len(df)
+        fvgs: List[FairValueGap] = []
+
+        for i in range(2, n):
+            # Bullish FVG: candle i low > candle i-2 high
+            if lows[i] > highs[i - 2]:
+                bottom = float(highs[i - 2])
+                top = float(lows[i])
+                gap_size = top - bottom
+                pct = (gap_size / bottom) * 100 if bottom > 0 else 0.0
+                if pct >= min_gap_pct:
+                    mitigated = False
+                    for j in range(i + 1, n):
+                        if lows[j] <= bottom:  # fully penetrated / filled
+                            mitigated = True
+                            break
+                    fvgs.append(FairValueGap(
+                        direction=TrendBias.BULLISH,
+                        top=top,
+                        bottom=bottom,
+                        candle_index=i - 1,
+                        timestamp=int(timestamps[i - 1]),
+                        mitigated=mitigated,
+                        size_pct=round(pct, 3)
+                    ))
+
+            # Bearish FVG: candle i high < candle i-2 low
+            elif highs[i] < lows[i - 2]:
+                top = float(lows[i - 2])
+                bottom = float(highs[i])
+                gap_size = top - bottom
+                pct = (gap_size / top) * 100 if top > 0 else 0.0
+                if pct >= min_gap_pct:
+                    mitigated = False
+                    for j in range(i + 1, n):
+                        if highs[j] >= top:  # fully penetrated / filled
+                            mitigated = True
+                            break
+                    fvgs.append(FairValueGap(
+                        direction=TrendBias.BEARISH,
+                        top=top,
+                        bottom=bottom,
+                        candle_index=i - 1,
+                        timestamp=int(timestamps[i - 1]),
+                        mitigated=mitigated,
+                        size_pct=round(pct, 3)
+                    ))
+
+        return fvgs
 

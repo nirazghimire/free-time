@@ -118,12 +118,13 @@ The system is engineered to:
 - [x] Comprehensive unit testing suite.
 - [x] Git repository initialization and `.gitignore` security shielding.
 
-### Phase 2: Enhanced Features (Upcoming)
-- [ ] Telegram / Discord webhook alert notifications on confirmed signals.
+### Phase 2: Enhanced Features (In Progress)
+- [x] Telegram & Discord webhook alert notifications on entries, exits, breakeven, and emergency events.
+- [x] Fair Value Gap (FVG) 3-candle imbalance detection & unmitigated gap tracking.
+- [x] Trailing Stop Loss feature (automatic Breakeven protection upon 1:1 R:R reached).
+- [x] On-chain Hyperliquid position reconciliation & desync protection across bot restarts.
 - [ ] Backtesting engine to evaluate historical win rate and R:R over 6–12 months of data.
-- [ ] Fair Value Gap (FVG) and Order Block (OB) confluence filtering.
 - [ ] Multi-asset scanner expansion beyond BTC, ETH, SOL to all top-volume Hyperliquid perps.
-- [ ] Trailing Stop Loss feature (moving SL to Breakeven upon 1:1 R:R reached).
 
 ---
 

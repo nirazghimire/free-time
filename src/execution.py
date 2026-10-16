@@ -95,6 +95,8 @@ class OrderExecutor:
             "notional_usd": setup.notional_usd,
             "risk_usd": setup.risk_usd,
             "risk_reward": setup.risk_reward,
+            "initial_sl": setup.stop_loss,
+            "breakeven_triggered": False,
             "entry_time": int(time.time() * 1000),
             "status": "OPEN",
             "pnl": 0.0,
@@ -225,6 +227,8 @@ class OrderExecutor:
                 "notional_usd": setup.notional_usd,
                 "risk_usd": setup.risk_usd,
                 "risk_reward": setup.risk_reward,
+                "initial_sl": sl_price,
+                "breakeven_triggered": False,
                 "entry_time": int(time.time() * 1000),
                 "status": "OPEN",
                 "pnl": 0.0,
@@ -245,10 +249,13 @@ class OrderExecutor:
             logger.error(f"Failed to execute live trade on Hyperliquid: {e}")
             return {"status": "error", "error": str(e)}
 
-    def check_open_positions_update(self, current_prices: Dict[str, float]):
+    def check_open_positions_update(self, current_prices: Dict[str, float]) -> List[Dict[str, Any]]:
         """
-        Update unrealized PnL and simulate SL/TP triggers for paper positions.
+        Update unrealized PnL, trigger 1:1 R:R breakeven stop loss adjustments,
+        and simulate SL/TP triggers for paper positions. Returns list of triggered events.
         """
+        events: List[Dict[str, Any]] = []
+
         for symbol, pos in list(self.paper_positions.items()):
             cur_px = current_prices.get(symbol)
             if not cur_px:
@@ -259,16 +266,66 @@ class OrderExecutor:
             direction = pos["direction"]
             sl = pos["stop_loss"]
             tp = pos["take_profit"]
+            initial_sl = pos.get("initial_sl", sl)
 
+            # --- Breakeven Trailing Stop at 1:1 R:R ---
+            if getattr(self.config, "enable_breakeven_at_1r", True) and not pos.get("breakeven_triggered"):
+                if direction == "BULLISH":
+                    risk_dist = entry - initial_sl
+                    if risk_dist > 0 and cur_px >= (entry + risk_dist):
+                        pos["breakeven_triggered"] = True
+                        pos["stop_loss"] = entry
+                        logger.info(
+                            f"🛡️ [BREAKEVEN TRIGGERED] {symbol} reached 1:1 R:R! "
+                            f"Stop Loss moved to Entry @ ${entry:,.2f}"
+                        )
+                        events.append({
+                            "event": "BREAKEVEN_TRIGGERED",
+                            "symbol": symbol,
+                            "entry_price": entry,
+                            "mode": pos.get("mode", "PAPER"),
+                            "time": int(time.time() * 1000)
+                        })
+                        if pos.get("mode") == "LIVE" and self.exchange:
+                            self._update_live_stop_loss(symbol, is_buy=False, size=size, new_sl_px=entry)
+                elif direction == "BEARISH":
+                    risk_dist = initial_sl - entry
+                    if risk_dist > 0 and cur_px <= (entry - risk_dist):
+                        pos["breakeven_triggered"] = True
+                        pos["stop_loss"] = entry
+                        logger.info(
+                            f"🛡️ [BREAKEVEN TRIGGERED] {symbol} reached 1:1 R:R! "
+                            f"Stop Loss moved to Entry @ ${entry:,.2f}"
+                        )
+                        events.append({
+                            "event": "BREAKEVEN_TRIGGERED",
+                            "symbol": symbol,
+                            "entry_price": entry,
+                            "mode": pos.get("mode", "PAPER"),
+                            "time": int(time.time() * 1000)
+                        })
+                        if pos.get("mode") == "LIVE" and self.exchange:
+                            self._update_live_stop_loss(symbol, is_buy=True, size=size, new_sl_px=entry)
+
+            # --- Check SL / TP Trigger ---
+            current_sl = pos["stop_loss"]
             if direction == "BULLISH":
                 pnl = (cur_px - entry) * size
                 # Check hit SL
-                if cur_px <= sl:
+                if cur_px <= current_sl:
                     pos["status"] = "CLOSED_SL"
-                    pos["pnl"] = (sl - entry) * size
-                    pos["exit_price"] = sl
+                    pos["pnl"] = (current_sl - entry) * size
+                    pos["exit_price"] = current_sl
                     pos["exit_time"] = int(time.time() * 1000)
-                    logger.info(f"🔴 [PAPER SL HIT] {symbol} hit Stop Loss @ ${sl:,.2f} | PnL: ${pos['pnl']:.2f}")
+                    logger.info(f"🔴 [PAPER SL HIT] {symbol} hit Stop Loss @ ${current_sl:,.2f} | PnL: ${pos['pnl']:.2f}")
+                    events.append({
+                        "event": "POSITION_CLOSED",
+                        "symbol": symbol,
+                        "status": "CLOSED_SL",
+                        "pnl": pos["pnl"],
+                        "exit_price": current_sl,
+                        "mode": pos.get("mode", "PAPER")
+                    })
                     del self.paper_positions[symbol]
                 # Check hit TP
                 elif cur_px >= tp:
@@ -277,18 +334,34 @@ class OrderExecutor:
                     pos["exit_price"] = tp
                     pos["exit_time"] = int(time.time() * 1000)
                     logger.info(f"🟢 [PAPER TP HIT] {symbol} hit Take Profit @ ${tp:,.2f} | PnL: +${pos['pnl']:.2f}")
+                    events.append({
+                        "event": "POSITION_CLOSED",
+                        "symbol": symbol,
+                        "status": "CLOSED_TP",
+                        "pnl": pos["pnl"],
+                        "exit_price": tp,
+                        "mode": pos.get("mode", "PAPER")
+                    })
                     del self.paper_positions[symbol]
                 else:
                     pos["pnl"] = pnl
             else:
                 pnl = (entry - cur_px) * size
                 # Check hit SL
-                if cur_px >= sl:
+                if cur_px >= current_sl:
                     pos["status"] = "CLOSED_SL"
-                    pos["pnl"] = (entry - sl) * size
-                    pos["exit_price"] = sl
+                    pos["pnl"] = (entry - current_sl) * size
+                    pos["exit_price"] = current_sl
                     pos["exit_time"] = int(time.time() * 1000)
-                    logger.info(f"🔴 [PAPER SL HIT] {symbol} hit Stop Loss @ ${sl:,.2f} | PnL: ${pos['pnl']:.2f}")
+                    logger.info(f"🔴 [PAPER SL HIT] {symbol} hit Stop Loss @ ${current_sl:,.2f} | PnL: ${pos['pnl']:.2f}")
+                    events.append({
+                        "event": "POSITION_CLOSED",
+                        "symbol": symbol,
+                        "status": "CLOSED_SL",
+                        "pnl": pos["pnl"],
+                        "exit_price": current_sl,
+                        "mode": pos.get("mode", "PAPER")
+                    })
                     del self.paper_positions[symbol]
                 # Check hit TP
                 elif cur_px <= tp:
@@ -297,9 +370,166 @@ class OrderExecutor:
                     pos["exit_price"] = tp
                     pos["exit_time"] = int(time.time() * 1000)
                     logger.info(f"🟢 [PAPER TP HIT] {symbol} hit Take Profit @ ${tp:,.2f} | PnL: +${pos['pnl']:.2f}")
+                    events.append({
+                        "event": "POSITION_CLOSED",
+                        "symbol": symbol,
+                        "status": "CLOSED_TP",
+                        "pnl": pos["pnl"],
+                        "exit_price": tp,
+                        "mode": pos.get("mode", "PAPER")
+                    })
                     del self.paper_positions[symbol]
                 else:
                     pos["pnl"] = pnl
+
+        return events
+
+    def _update_live_stop_loss(self, symbol: str, is_buy: bool, size: float, new_sl_px: float):
+        """Update Stop Loss trigger order on Hyperliquid to breakeven."""
+        if not self.exchange:
+            return
+        try:
+            from src.risk_manager import format_hyperliquid_price
+            formatted_sl = format_hyperliquid_price(new_sl_px)
+            logger.info(f"[{symbol}] Updating live SL trigger order to breakeven @ ${formatted_sl:,.2f}...")
+            self.exchange.order(
+                name=symbol,
+                is_buy=is_buy,
+                sz=size,
+                limit_px=formatted_sl,
+                order_type={
+                    "trigger": {
+                        "isMarket": True,
+                        "triggerPx": formatted_sl,
+                        "tpsl": "sl",
+                    }
+                },
+                reduce_only=True
+            )
+        except Exception as e:
+            logger.warning(f"[{symbol}] Failed to update live SL to breakeven: {e}")
+
+    def reconcile_exchange_positions(
+        self,
+        live_positions: List[Dict[str, Any]],
+        current_prices: Dict[str, float]
+    ) -> List[Dict[str, Any]]:
+        """
+        Reconcile tracked live positions with actual on-chain Hyperliquid account state.
+        1. If a position was active in self.paper_positions (mode=LIVE) but is no longer in live_positions,
+           it has been closed on Hyperliquid (by SL, TP, or liquidation).
+        2. If a position is active on Hyperliquid but missing from self.paper_positions,
+           adopt it so we don't double-enter.
+        """
+        if self.is_dry_run or not self.exchange:
+            return []
+
+        events: List[Dict[str, Any]] = []
+        live_coin_map = {
+            p["coin"].upper(): p for p in live_positions if abs(float(p.get("size", 0.0))) > 0
+        }
+
+        # Check existing tracked live positions
+        for symbol, pos in list(self.paper_positions.items()):
+            if pos.get("mode") != "LIVE":
+                continue
+
+            if symbol not in live_coin_map:
+                # Closed on exchange!
+                cur_px = current_prices.get(symbol, pos.get("entry_price", 0.0))
+                entry = pos["entry_price"]
+                sl = pos["stop_loss"]
+                tp = pos["take_profit"]
+                direction = pos["direction"]
+                size = pos["size"]
+
+                if direction == "BULLISH":
+                    if sl > 0 and cur_px <= sl:
+                        status = "CLOSED_SL"
+                        pnl = (sl - entry) * size
+                    elif tp > 0 and cur_px >= tp:
+                        status = "CLOSED_TP"
+                        pnl = (tp - entry) * size
+                    else:
+                        status = "CLOSED_ON_EXCHANGE"
+                        pnl = (cur_px - entry) * size
+                else:
+                    if sl > 0 and cur_px >= sl:
+                        status = "CLOSED_SL"
+                        pnl = (entry - sl) * size
+                    elif tp > 0 and cur_px <= tp:
+                        status = "CLOSED_TP"
+                        pnl = (entry - tp) * size
+                    else:
+                        status = "CLOSED_ON_EXCHANGE"
+                        pnl = (entry - cur_px) * size
+
+                pos["status"] = status
+                pos["pnl"] = pnl
+                pos["exit_price"] = cur_px
+                pos["exit_time"] = int(time.time() * 1000)
+                logger.info(
+                    f"⚡ [EXCHANGE SYNC] {symbol} position closed on Hyperliquid ({status}) | "
+                    f"Est. PnL: ${pnl:.2f}"
+                )
+                del self.paper_positions[symbol]
+                events.append({
+                    "event": "POSITION_CLOSED_ON_EXCHANGE",
+                    "symbol": symbol,
+                    "status": status,
+                    "pnl": pnl,
+                    "exit_price": cur_px,
+                    "mode": "LIVE"
+                })
+            else:
+                # Still open, update unrealized PnL and size
+                ex_pos = live_coin_map[symbol]
+                pos["pnl"] = float(ex_pos.get("unrealized_pnl", pos.get("pnl", 0.0)))
+                pos["size"] = abs(float(ex_pos.get("size", pos["size"])))
+
+        # Adopt any open positions on exchange that aren't tracked
+        for coin, ex_pos in live_coin_map.items():
+            if coin not in self.paper_positions:
+                size_signed = float(ex_pos.get("size", 0.0))
+                size = abs(size_signed)
+                direction = "BULLISH" if size_signed > 0 else "BEARISH"
+                entry_px = float(ex_pos.get("entry_px", 0.0))
+                pnl = float(ex_pos.get("unrealized_pnl", 0.0))
+
+                record = {
+                    "id": f"live_adopted_{int(time.time()*1000)}",
+                    "symbol": coin,
+                    "direction": direction,
+                    "size": size,
+                    "entry_price": entry_px,
+                    "stop_loss": 0.0,
+                    "initial_sl": 0.0,
+                    "take_profit": 0.0,
+                    "notional_usd": round(size * entry_px, 2),
+                    "risk_usd": 0.0,
+                    "risk_reward": 0.0,
+                    "entry_time": int(time.time() * 1000),
+                    "status": "OPEN",
+                    "pnl": pnl,
+                    "mode": "LIVE",
+                    "adopted_from_exchange": True,
+                    "breakeven_triggered": False
+                }
+                self.paper_positions[coin] = record
+                self.trade_history.append(record)
+                logger.info(
+                    f"🔄 [EXCHANGE SYNC] Discovered existing position on Hyperliquid: "
+                    f"{direction} {size} {coin} @ ${entry_px:,.2f}. Position adopted into tracker."
+                )
+                events.append({
+                    "event": "POSITION_ADOPTED",
+                    "symbol": coin,
+                    "direction": direction,
+                    "size": size,
+                    "entry_price": entry_px
+                })
+
+        return events
 
     def close_all_positions(self) -> List[Dict[str, Any]]:
         """Emergency close all positions."""

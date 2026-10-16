@@ -442,3 +442,74 @@ def test_5m_trigger_max_lookback_candles_enforced():
     )
 
 
+# ─── Fair Value Gap (FVG) Tests ──────────────────────────────────────────────
+
+def test_bullish_fair_value_gap_detection_and_mitigation():
+    """Test 3-candle Bullish FVG where low[i] > high[i-2], and track its mitigation."""
+    smc = SMCEngine()
+    # Candle 0: high = 100
+    # Candle 1: impulse up [101, 108, 100, 107]
+    # Candle 2: low = 103 > high[0]=100 -> Bullish FVG in range [100, 103]
+    # Candle 3: doesn't fill [105, 110, 104, 109]
+    # Candle 4: dips to low 99 -> fills/mitigates the FVG!
+    data = [
+        [98,  100, 97,  99],   # 0: high = 100
+        [99,  108, 99,  107],  # 1: impulse
+        [107, 112, 103, 111],  # 2: low = 103 > 100 -> FVG [100, 103]
+        [111, 114, 105, 113],  # 3: unmitigated
+    ]
+    df_unmitigated = create_candle_df(data)
+    fvgs = smc.detect_fair_value_gaps(df_unmitigated)
+    assert len(fvgs) == 1
+    fvg = fvgs[0]
+    assert fvg.direction == TrendBias.BULLISH
+    assert fvg.bottom == 100.0
+    assert fvg.top == 103.0
+    assert not fvg.mitigated
+
+    # Add candle 4 that penetrates and fills the FVG
+    data_mitigated = data + [[112, 113, 99, 102]]  # low = 99 <= 100
+    df_mitigated = create_candle_df(data_mitigated)
+    fvgs_mitigated = smc.detect_fair_value_gaps(df_mitigated)
+    assert len(fvgs_mitigated) >= 1
+    assert fvgs_mitigated[0].mitigated is True
+
+
+def test_bearish_fair_value_gap_detection_and_mitigation():
+    """Test 3-candle Bearish FVG where high[i] < low[i-2]."""
+    smc = SMCEngine()
+    # Candle 0: low = 200
+    # Candle 1: impulse down [199, 199, 190, 191]
+    # Candle 2: high = 196 < low[0]=200 -> Bearish FVG in range [196, 200]
+    data = [
+        [202, 205, 200, 201],  # 0: low = 200
+        [201, 201, 190, 191],  # 1: impulse down
+        [191, 196, 188, 189],  # 2: high = 196 < 200 -> FVG [196, 200]
+        [189, 192, 185, 186],  # 3: unmitigated
+    ]
+    df = create_candle_df(data)
+    fvgs = smc.detect_fair_value_gaps(df)
+    assert len(fvgs) == 1
+    fvg = fvgs[0]
+    assert fvg.direction == TrendBias.BEARISH
+    assert fvg.bottom == 196.0
+    assert fvg.top == 200.0
+    assert not fvg.mitigated
+
+
+def test_fair_value_gap_attached_to_timeframe_analysis():
+    """Verify active (unmitigated) FVGs are attached to TimeframeAnalysis."""
+    smc = SMCEngine(swing_lookback=1)
+    data = [
+        [98,  100, 97,  99],
+        [99,  108, 99,  107],
+        [107, 112, 103, 111],
+        [111, 114, 105, 113],
+    ]
+    df = create_candle_df(data)
+    analysis = smc.analyze_structure(df, "ETH", "15m")
+    assert hasattr(analysis, "active_fvgs")
+    assert len(analysis.active_fvgs) == 1
+    assert analysis.active_fvgs[0].direction == TrendBias.BULLISH
+
+

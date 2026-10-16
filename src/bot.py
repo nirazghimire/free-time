@@ -11,6 +11,7 @@ from config import BotConfig
 from src.market_data import MarketDataClient
 from src.strategy import MTFStrategy, SymbolEvaluation
 from src.execution import OrderExecutor
+from src.alerts import AlertManager
 
 logger = logging.getLogger("smc_bot")
 
@@ -21,6 +22,7 @@ class SMCBot:
         self.market_data = MarketDataClient(config)
         self.strategy = MTFStrategy(config, self.market_data)
         self.executor = OrderExecutor(config)
+        self.alerts = AlertManager(config)
 
         self.is_running = False
         self.last_evaluations: Dict[str, SymbolEvaluation] = {}
@@ -60,8 +62,40 @@ class SMCBot:
         self.mid_prices = self.market_data.get_mid_prices()
         self.account_state = self.market_data.get_account_state()
 
-        # Update paper positions check against current prices
-        self.executor.check_open_positions_update(self.mid_prices)
+        # Reconcile on-chain positions from Hyperliquid account state (adopt new, detect closed)
+        exchange_events = self.executor.reconcile_exchange_positions(
+            self.account_state.get("positions", []),
+            self.mid_prices
+        )
+        for ev in exchange_events:
+            self.broadcast_event(ev["event"], ev)
+            if ev["event"] == "POSITION_CLOSED_ON_EXCHANGE":
+                self.alerts.send_trade_exit(
+                    symbol=ev["symbol"],
+                    status=ev.get("status", "CLOSED_ON_EXCHANGE"),
+                    pnl=ev.get("pnl", 0.0),
+                    exit_price=ev.get("exit_price", 0.0),
+                    mode=ev.get("mode", "LIVE")
+                )
+
+        # Update positions check against current prices (breakeven at 1R & SL/TP triggers)
+        pos_events = self.executor.check_open_positions_update(self.mid_prices)
+        for ev in pos_events:
+            self.broadcast_event(ev["event"], ev)
+            if ev["event"] == "BREAKEVEN_TRIGGERED":
+                self.alerts.send_breakeven(
+                    symbol=ev["symbol"],
+                    entry_price=ev["entry_price"],
+                    mode=ev.get("mode", "PAPER")
+                )
+            elif ev["event"] == "POSITION_CLOSED":
+                self.alerts.send_trade_exit(
+                    symbol=ev["symbol"],
+                    status=ev["status"],
+                    pnl=ev.get("pnl", 0.0),
+                    exit_price=ev.get("exit_price", 0.0),
+                    mode=ev.get("mode", "PAPER")
+                )
 
         # Usable balance
         balance = self.account_state.get("account_value", 0.0)
@@ -118,6 +152,26 @@ class SMCBot:
                             "execution_result": exec_res
                         })
 
+                        # Dispatch alert notification
+                        mode_str = "PAPER" if self.config.dry_run else "LIVE"
+                        if exec_res.get("status") == "success":
+                            self.alerts.send_trade_entry({
+                                "symbol": symbol,
+                                "direction": eval_res.trade_setup.direction.value,
+                                "entry_price": eval_res.trade_setup.entry_price,
+                                "stop_loss": eval_res.trade_setup.stop_loss,
+                                "take_profit": eval_res.trade_setup.take_profit,
+                                "size": eval_res.trade_setup.size,
+                                "notional_usd": eval_res.trade_setup.notional_usd,
+                                "risk_usd": eval_res.trade_setup.risk_usd,
+                                "risk_reward": eval_res.trade_setup.risk_reward,
+                            }, mode=mode_str)
+                        elif exec_res.get("status") == "error":
+                            self.alerts.send_emergency_alert(
+                                symbol=symbol,
+                                message=str(exec_res.get("error", "Execution failure"))
+                            )
+
             except Exception as e:
                 logger.error(f"Error evaluating {symbol}: {e}", exc_info=True)
 
@@ -139,6 +193,7 @@ class SMCBot:
                     "has_sweep": len(ta.recent_sweeps) > 0,
                     "has_bos": any(e.event_type.value == "BOS" for e in ta.recent_events),
                     "has_choch": any(e.event_type.value == "CHOCH" for e in ta.recent_events),
+                    "active_fvgs_count": len(ta.active_fvgs),
                 }
 
             symbols_data[sym] = {

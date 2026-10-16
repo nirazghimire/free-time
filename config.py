@@ -38,6 +38,14 @@ class BotConfig:
     swing_lookback: int = 2  # candles to left and right to define a pivot high/low
     sweep_max_candles_age: int = 12  # how many 15m candles back a sweep remains valid
     trigger_max_5m_candles: int = 8  # how many 5m candles after a 15m sweep to confirm a 5m BOS
+
+    # Trailing Stop / Breakeven
+    enable_breakeven_at_1r: bool = os.getenv("ENABLE_BREAKEVEN_AT_1R", "true").lower() in ("true", "1", "yes")
+
+    # Notifications (Discord & Telegram Webhooks)
+    discord_webhook_url: str = os.getenv("DISCORD_WEBHOOK_URL", "")
+    telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
     
     # Dashboard
     dashboard_port: int = int(os.getenv("DASHBOARD_PORT", "8000"))

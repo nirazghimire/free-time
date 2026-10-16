@@ -92,3 +92,8 @@ Thumbs.db
 *~
 *.sublime-workspace
 *.sublime-project
+
+
+
+#any .md files
+*.md

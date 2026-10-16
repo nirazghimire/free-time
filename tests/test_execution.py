@@ -59,11 +59,12 @@ def test_pnl_updates_and_sl_hit():
     setup = create_mock_setup(symbol="BTC", direction=TrendBias.BULLISH, entry=80000.0, sl=79500.0, tp=81250.0, size=0.001)
     executor.execute_trade(setup)
 
-    # 1. Price increases to 80500 -> PnL should be +0.50
-    executor.check_open_positions_update({"BTC": 80500.0})
+    # 1. Price increases to 80200 (< 80500 breakeven) -> PnL should be +0.20
+    executor.check_open_positions_update({"BTC": 80200.0})
     pos = executor.paper_positions.get("BTC")
     assert pos is not None
-    assert round(pos["pnl"], 2) == 0.50
+    assert round(pos["pnl"], 2) == 0.20
+    assert pos["stop_loss"] == 79500.0  # SL unchanged
 
     # 2. Price crashes to 79400 (below SL 79500) -> SL should trigger and close position
     executor.check_open_positions_update({"BTC": 79400.0})
@@ -104,3 +105,62 @@ def test_close_all_positions():
     closed_res = executor.close_all_positions()
     assert len(closed_res) == 2
     assert len(executor.paper_positions) == 0
+
+
+def test_breakeven_trailing_stop_triggered_at_1r():
+    """When price reaches 1:1 R:R, SL is automatically moved to Entry price."""
+    config = BotConfig(dry_run=True, enable_breakeven_at_1r=True)
+    executor = OrderExecutor(config)
+
+    # Bullish: entry 80000, initial SL 79500 (risk = 500), TP 81250
+    setup = create_mock_setup(symbol="BTC", direction=TrendBias.BULLISH, entry=80000.0, sl=79500.0, tp=81250.0, size=0.001)
+    executor.execute_trade(setup)
+    pos = executor.paper_positions["BTC"]
+    assert pos["stop_loss"] == 79500.0
+    assert not pos.get("breakeven_triggered")
+
+    # Price hits 80500 (entry + 500 = 1:1 R:R)
+    events = executor.check_open_positions_update({"BTC": 80500.0})
+    assert any(e.get("event") == "BREAKEVEN_TRIGGERED" for e in events)
+    assert pos["breakeven_triggered"] is True
+    assert pos["stop_loss"] == 80000.0  # SL moved to entry
+
+    # Later price drops back down to 79900 (below entry 80000)
+    exit_events = executor.check_open_positions_update({"BTC": 79900.0})
+    assert "BTC" not in executor.paper_positions
+    assert any(e.get("status") == "CLOSED_SL" for e in exit_events)
+    # Exited at breakeven SL (80000) -> 0.0 PnL, protected from original 79500 loss
+    closed_trade = executor.trade_history[-1]
+    assert closed_trade["exit_price"] == 80000.0
+    assert closed_trade["pnl"] == 0.0
+
+
+def test_reconcile_exchange_positions_adoption_and_closure():
+    """Test reconciling positions with Hyperliquid account state."""
+    config = BotConfig(dry_run=False)
+    executor = OrderExecutor(config)
+    # Mock exchange so reconcile runs
+    executor.exchange = object()
+    executor.is_dry_run = False
+
+    # 1. Adopt an existing open position discovered on Hyperliquid
+    live_positions = [{
+        "coin": "SOL",
+        "size": 1.5,
+        "entry_px": 150.0,
+        "unrealized_pnl": 4.5,
+    }]
+    events = executor.reconcile_exchange_positions(live_positions, {"SOL": 153.0})
+    assert any(e.get("event") == "POSITION_ADOPTED" for e in events)
+    assert "SOL" in executor.paper_positions
+    sol_pos = executor.paper_positions["SOL"]
+    assert sol_pos["size"] == 1.5
+    assert sol_pos["entry_price"] == 150.0
+    assert sol_pos["direction"] == "BULLISH"
+    assert sol_pos["mode"] == "LIVE"
+
+    # 2. Simulate next scan where SOL position has closed on Hyperliquid (empty positions list)
+    closure_events = executor.reconcile_exchange_positions([], {"SOL": 155.0})
+    assert any(e.get("event") == "POSITION_CLOSED_ON_EXCHANGE" for e in closure_events)
+    assert "SOL" not in executor.paper_positions
+    assert executor.trade_history[-1]["status"] == "CLOSED_ON_EXCHANGE"

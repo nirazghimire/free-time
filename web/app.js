@@ -193,6 +193,7 @@ function renderMtfMatrix(symbols) {
       if (tfData.has_sweep) tagsHtml += `<span class="mini-tag pill-sweep">SWEEP</span>`;
       if (tfData.has_bos) tagsHtml += `<span class="mini-tag pill-bos">BOS</span>`;
       if (tfData.has_choch) tagsHtml += `<span class="mini-tag pill-bos">CHOCH</span>`;
+      if (tfData.active_fvgs_count > 0) tagsHtml += `<span class="mini-tag" style="background:rgba(168,85,247,0.25); color:#d8b4fe;">FVG</span>`;
 
       tfCardsHtml += `
         <div class="tf-card ${cardClass}">
@@ -246,6 +247,9 @@ function renderPositionsTable(positions) {
     const sideClass = isBull ? "pill-bullish" : "pill-bearish";
     const pnl = pos.pnl || 0;
     const pnlColor = pnl > 0 ? "style='color: var(--bullish);'" : pnl < 0 ? "style='color: var(--bearish);'" : "";
+    const slHtml = pos.breakeven_triggered 
+      ? `<span style="color:#38bdf8;">$${formatPrice(pos.stop_loss)} <span style="font-size:0.65rem; background:rgba(56,189,248,0.25); padding:1px 4px; border-radius:3px; font-weight:700;">BE</span></span>`
+      : `<span style="color:#f43f5e;">$${formatPrice(pos.stop_loss)}</span>`;
 
     tr.innerHTML = `
       <td><strong>${pos.symbol}</strong></td>
@@ -253,7 +257,7 @@ function renderPositionsTable(positions) {
       <td>${pos.size}</td>
       <td>$${formatPrice(pos.entry_price)}</td>
       <td>$${formatPrice(currentSnapshot?.symbols[pos.symbol]?.current_price || pos.entry_price)}</td>
-      <td style="color:#f43f5e;">$${formatPrice(pos.stop_loss)}</td>
+      <td>${slHtml}</td>
       <td style="color:#10b981;">$${formatPrice(pos.take_profit)}</td>
       <td ${pnlColor}><strong>${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</strong></td>
       <td><span class="badge-live">${pos.status}</span></td>
