@@ -797,3 +797,196 @@ class SMCEngine:
 
         return None
 
+    def check_1h_rejection_at_zone(
+        self,
+        df_1h: pd.DataFrame,
+        zones: List[DemandZone],
+        target_direction: TrendBias,
+        lookback_candles: int = 4,
+        min_wick_ratio: float = 0.70
+    ) -> Optional[ReactionConfirmation]:
+        """
+        Check if a 1H candle taps into a HTF Demand/Supply Zone and produces:
+        1. Rejection Wick >= 70% of candle body (or >= 50% of candle range)
+        2. OR closes above the wick of the previous candle (close > high[i-1] for long).
+        """
+        if len(df_1h) < 2:
+            return None
+
+        opens = df_1h["open"].values
+        highs = df_1h["high"].values
+        lows = df_1h["low"].values
+        closes = df_1h["close"].values
+        timestamps = df_1h["timestamp"].values if "timestamp" in df_1h.columns else [0] * len(df_1h)
+        n = len(df_1h)
+
+        valid_zones = [z for z in zones if z.direction == target_direction and not z.is_invalidated]
+        if not valid_zones:
+            return None
+
+        start_idx = max(1, n - lookback_candles)
+        for i in range(start_idx, n):
+            c_open = opens[i]
+            c_high = highs[i]
+            c_low = lows[i]
+            c_close = closes[i]
+            c_time = int(timestamps[i])
+            c_range = c_high - c_low
+            body = abs(c_close - c_open)
+
+            if target_direction == TrendBias.BULLISH:
+                tapped_zone = next((z for z in valid_zones if c_low <= z.top and c_close >= z.bottom), None)
+                if not tapped_zone:
+                    continue
+
+                lower_wick = min(c_open, c_close) - c_low
+                wick_ratio_body = (lower_wick / body) if body > 0 else 1.0
+                wick_ratio_range = (lower_wick / c_range) if c_range > 0 else 0.0
+                is_wick_confirmed = (wick_ratio_body >= min_wick_ratio) or (wick_ratio_range >= 0.50)
+                is_close_above_wick = (c_close > highs[i - 1])
+
+                if is_wick_confirmed or is_close_above_wick:
+                    reaction_type = "1H_CLOSE_ABOVE_PREV_WICK" if is_close_above_wick else "1H_70PCT_REJECTION_WICK"
+                    return ReactionConfirmation(
+                        confirmed=True,
+                        reaction_type=reaction_type,
+                        reaction_price=c_close,
+                        invalidation_level=min(c_low, tapped_zone.bottom),
+                        timestamp=c_time,
+                        zone=tapped_zone
+                    )
+
+            elif target_direction == TrendBias.BEARISH:
+                tapped_zone = next((z for z in valid_zones if c_high >= z.bottom and c_close <= z.top), None)
+                if not tapped_zone:
+                    continue
+
+                upper_wick = c_high - max(c_open, c_close)
+                wick_ratio_body = (upper_wick / body) if body > 0 else 1.0
+                wick_ratio_range = (upper_wick / c_range) if c_range > 0 else 0.0
+                is_wick_confirmed = (wick_ratio_body >= min_wick_ratio) or (wick_ratio_range >= 0.50)
+                is_close_below_wick = (c_close < lows[i - 1])
+
+                if is_wick_confirmed or is_close_below_wick:
+                    reaction_type = "1H_CLOSE_BELOW_PREV_WICK" if is_close_below_wick else "1H_70PCT_REJECTION_WICK"
+                    return ReactionConfirmation(
+                        confirmed=True,
+                        reaction_type=reaction_type,
+                        reaction_price=c_close,
+                        invalidation_level=max(c_high, tapped_zone.top),
+                        timestamp=c_time,
+                        zone=tapped_zone
+                    )
+
+        return None
+
+    def detect_15m_engulfing_trigger(
+        self,
+        df_15m: pd.DataFrame,
+        target_direction: TrendBias,
+        lookback_candles: int = 4
+    ) -> Optional[StructureEvent]:
+        """
+        Check if a recent 15-Minute candle engulfed the previous candle and closed beyond it:
+        - Bullish: 15M candle is green, close > open[i-1] and close >= close[i-1] (or close > high[i-1]).
+        - Bearish: 15M candle is red, close < open[i-1] and close <= close[i-1] (or close < low[i-1]).
+        """
+        if len(df_15m) < 2:
+            return None
+
+        opens = df_15m["open"].values
+        highs = df_15m["high"].values
+        lows = df_15m["low"].values
+        closes = df_15m["close"].values
+        timestamps = df_15m["timestamp"].values if "timestamp" in df_15m.columns else [0] * len(df_15m)
+        n = len(df_15m)
+
+        start_idx = max(1, n - lookback_candles)
+        for i in range(start_idx, n):
+            c_open = opens[i]
+            c_close = closes[i]
+            c_time = int(timestamps[i])
+            prev_open = opens[i - 1]
+            prev_close = closes[i - 1]
+            prev_high = highs[i - 1]
+            prev_low = lows[i - 1]
+
+            if target_direction == TrendBias.BULLISH:
+                # Bullish candle that engulfs previous candle body / closes above it
+                if c_close > c_open and (c_close >= prev_open and c_close > prev_close):
+                    broken_sp = SwingPoint(index=i - 1, timestamp=int(timestamps[i - 1]), price=prev_high, is_high=True)
+                    return StructureEvent(
+                        event_type=EventType.BOS,
+                        direction=TrendBias.BULLISH,
+                        candle_index=i,
+                        timestamp=c_time,
+                        trigger_price=max(prev_open, prev_close),
+                        broken_swing=broken_sp,
+                        candle_close=c_close
+                    )
+            elif target_direction == TrendBias.BEARISH:
+                # Bearish candle that engulfs previous candle body / closes below it
+                if c_close < c_open and (c_close <= prev_open and c_close < prev_close):
+                    broken_sp = SwingPoint(index=i - 1, timestamp=int(timestamps[i - 1]), price=prev_low, is_high=False)
+                    return StructureEvent(
+                        event_type=EventType.BOS,
+                        direction=TrendBias.BEARISH,
+                        candle_index=i,
+                        timestamp=c_time,
+                        trigger_price=min(prev_open, prev_close),
+                        broken_swing=broken_sp,
+                        candle_close=c_close
+                    )
+
+        return None
+
+    def detect_12h_liquidity_sweep(
+        self,
+        df_12h: pd.DataFrame,
+        swing_points: List[SwingPoint]
+    ) -> Optional[LiquiditySweep]:
+        """
+        Check if a 12H candle wicked beyond a swing point but closed inside (liquidity grab).
+        - Bullish sweep: wicks below swing low, closes above it.
+        - Bearish sweep: wicks above swing high, closes below it.
+        """
+        if len(df_12h) < 1 or not swing_points:
+            return None
+
+        c_high = float(df_12h["high"].iloc[-1])
+        c_low = float(df_12h["low"].iloc[-1])
+        c_close = float(df_12h["close"].iloc[-1])
+        c_time = int(df_12h["timestamp"].iloc[-1]) if "timestamp" in df_12h.columns else 0
+
+        recent_sh = [s for s in swing_points if s.is_high and not s.broken]
+        recent_sl = [s for s in swing_points if not s.is_high and not s.broken]
+
+        if recent_sh:
+            target_sh = recent_sh[-1]
+            if c_high > target_sh.price and c_close <= target_sh.price:
+                return LiquiditySweep(
+                    direction=TrendBias.BEARISH,
+                    swing_point=target_sh,
+                    sweep_candle_index=len(df_12h) - 1,
+                    sweep_timestamp=c_time,
+                    wick_extreme=c_high,
+                    candle_close=c_close,
+                    is_active=True
+                )
+
+        if recent_sl:
+            target_sl = recent_sl[-1]
+            if c_low < target_sl.price and c_close >= target_sl.price:
+                return LiquiditySweep(
+                    direction=TrendBias.BULLISH,
+                    swing_point=target_sl,
+                    sweep_candle_index=len(df_12h) - 1,
+                    sweep_timestamp=c_time,
+                    wick_extreme=c_low,
+                    candle_close=c_close,
+                    is_active=True
+                )
+
+        return None
+
+

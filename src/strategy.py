@@ -242,10 +242,49 @@ class MTFStrategy:
                 ])
 
         all_target_zones = htf_zones + ltf_zones
+        df_1h = candles_by_tf.get("1h", pd.DataFrame())
+        df_15m = candles_by_tf.get("15m", pd.DataFrame())
         df_5m = candles_by_tf.get("5m", pd.DataFrame())
 
+        # Target TP Price (1H Swing High for Long, 1H Swing Low for Short)
+        target_tp_price = None
+        analysis_1h = analyses.get("1h")
+        if analysis_1h:
+            if target_direction == TrendBias.BULLISH and analysis_1h.last_swing_high:
+                target_tp_price = analysis_1h.last_swing_high.price
+            elif target_direction == TrendBias.BEARISH and analysis_1h.last_swing_low:
+                target_tp_price = analysis_1h.last_swing_low.price
+
         reaction: Optional[ReactionConfirmation] = None
-        if not df_5m.empty and (all_target_zones or ltf_fvgs):
+
+        # 1. Check 1H Rejection Wick / Prev Wick Close + 15M Engulfing Confirmation
+        if getattr(self.config, "confirmation_timeframe", "15m") == "15m" and not df_15m.empty:
+            trigger_15m = self.smc.detect_15m_engulfing_trigger(df_15m, target_direction, lookback_candles=4)
+            h1_rejection = self.smc.check_1h_rejection_at_zone(
+                df_1h=df_1h,
+                zones=all_target_zones,
+                target_direction=target_direction,
+                lookback_candles=4,
+                min_wick_ratio=getattr(self.config, "rejection_wick_ratio_1h", 0.70)
+            ) if not df_1h.empty else None
+
+            if trigger_15m:
+                anchor_sl = h1_rejection.invalidation_level if h1_rejection else (
+                    all_target_zones[-1].bottom if (all_target_zones and target_direction == TrendBias.BULLISH)
+                    else (all_target_zones[-1].top if (all_target_zones and target_direction == TrendBias.BEARISH) else trigger_15m.trigger_price * 0.999)
+                )
+                reaction = ReactionConfirmation(
+                    confirmed=True,
+                    reaction_type="15M_ENGULFING",
+                    reaction_price=trigger_15m.candle_close,
+                    invalidation_level=anchor_sl,
+                    timestamp=trigger_15m.timestamp,
+                    zone=h1_rejection.zone if h1_rejection else (all_target_zones[-1] if all_target_zones else None),
+                    fvg=ltf_fvgs[-1] if ltf_fvgs else None
+                )
+
+        # 2. Fallback to 5M reaction if 15M not triggered or confirmation_timeframe is 5m
+        if not reaction and not df_5m.empty and (all_target_zones or ltf_fvgs):
             reaction = self.smc.check_zone_and_fvg_tap_with_reaction(
                 df=df_5m,
                 zones=all_target_zones,
@@ -285,7 +324,8 @@ class MTFStrategy:
                     sz_decimals=sz_decimals,
                     anchor_sl_price=reaction.invalidation_level,
                     demand_zone=reaction.zone,
-                    reaction=reaction
+                    reaction=reaction,
+                    target_tp_price=target_tp_price
                 )
 
                 if trade_setup:
@@ -390,6 +430,14 @@ class MTFStrategy:
                         else:
                             summary_msg += f" | 5M {trigger_5m.event_type.value} CONFIRMED! (Close: ${trigger_close:,.2f})"
 
+                            target_tp_price = None
+                            analysis_1h = analyses.get("1h")
+                            if analysis_1h:
+                                if active_sweep.direction == TrendBias.BULLISH and analysis_1h.last_swing_high:
+                                    target_tp_price = analysis_1h.last_swing_high.price
+                                elif active_sweep.direction == TrendBias.BEARISH and analysis_1h.last_swing_low:
+                                    target_tp_price = analysis_1h.last_swing_low.price
+
                             sz_decimals = self.market_data.get_sz_decimals(symbol)
                             trade_setup = self.risk_manager.calculate_trade_setup(
                                 symbol=symbol,
@@ -397,7 +445,8 @@ class MTFStrategy:
                                 entry_price=current_px,
                                 sweep=active_sweep,
                                 account_balance=account_balance,
-                                sz_decimals=sz_decimals
+                                sz_decimals=sz_decimals,
+                                target_tp_price=target_tp_price
                             )
                             if trade_setup:
                                 summary_msg += (

@@ -17,6 +17,7 @@ logger = logging.getLogger("market_data")
 LOOKBACK_MS = {
     "1w": 365 * 24 * 3600 * 1000,   # 1 year (~52 candles)
     "1d": 120 * 24 * 3600 * 1000,   # 120 days
+    "12h": 60 * 24 * 3600 * 1000,   # 60 days (~120 candles)
     "4h": 30 * 24 * 3600 * 1000,    # 30 days (~180 candles)
     "1h": 14 * 24 * 3600 * 1000,    # 14 days (~336 candles)
     "15m": 4 * 24 * 3600 * 1000,    # 4 days (~384 candles)
@@ -27,6 +28,7 @@ LOOKBACK_MS = {
 INTERVAL_MS = {
     "1w": 7 * 24 * 3600 * 1000,
     "1d": 24 * 3600 * 1000,
+    "12h": 12 * 3600 * 1000,
     "4h": 4 * 3600 * 1000,
     "1h": 3600 * 1000,
     "15m": 15 * 60 * 1000,
@@ -37,6 +39,7 @@ INTERVAL_MS = {
 CANDLE_CACHE_TTL = {
     "1w": 3600,   # 1 hour
     "1d": 1800,   # 30 mins
+    "12h": 1800,  # 30 mins
     "4h": 600,    # 10 mins
     "1h": 300,    # 5 mins
     "15m": 0,     # Fresh every scan
@@ -48,17 +51,32 @@ class MarketDataClient:
     def __init__(self, config: BotConfig):
         self.config = config
         self.base_url = config.api_url
-        self.info = Info(self.base_url, skip_ws=True)
+        try:
+            self.info = Info(self.base_url, skip_ws=True)
+        except Exception as e:
+            logger.warning(f"Could not initialize Hyperliquid Info client: {e}")
+            self.info = None
         self._meta_cache: Optional[Dict[str, Any]] = None
         self._asset_decimals: Dict[str, int] = {}
         self._cache_candles: Dict[str, Dict[str, Any]] = {}
         self._candle_cache: Dict[str, tuple] = {}  # key: (symbol, interval) -> (cached_at_sec, df)
 
+    def _ensure_info(self) -> Optional[Info]:
+        if self.info is None:
+            try:
+                self.info = Info(self.base_url, skip_ws=True)
+            except Exception:
+                return None
+        return self.info
+
     def get_meta(self) -> Dict[str, Any]:
         """Fetch universe metadata including szDecimals."""
         if not self._meta_cache:
+            info = self._ensure_info()
+            if not info:
+                return {"universe": []}
             try:
-                self._meta_cache = self.info.meta()
+                self._meta_cache = info.meta()
                 for asset in self._meta_cache.get("universe", []):
                     self._asset_decimals[asset["name"]] = asset.get("szDecimals", 3)
             except Exception as e:
@@ -70,12 +88,16 @@ class MarketDataClient:
         """Get lot size decimal precision for an asset."""
         if not self._asset_decimals:
             self.get_meta()
-        return self._asset_decimals.get(symbol.upper(), 3)
+        fallback_decimals = {"BTC": 5, "ETH": 4, "SOL": 2}
+        return self._asset_decimals.get(symbol.upper(), fallback_decimals.get(symbol.upper(), 3))
 
     def get_mid_prices(self) -> Dict[str, float]:
         """Fetch all current mid prices from Hyperliquid."""
+        info = self._ensure_info()
+        if not info:
+            return {}
         try:
-            mids = self.info.all_mids()
+            mids = info.all_mids()
             return {k: float(v) for k, v in mids.items()}
         except Exception as e:
             logger.error(f"Failed to fetch mid prices: {e}")

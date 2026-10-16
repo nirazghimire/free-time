@@ -184,11 +184,59 @@ def test_strategy_demand_fvg_confluence_trade_trigger():
     res = strategy.evaluate_symbol("BTC", account_balance=15.0, cached_data=mock_data)
     assert res.reaction_confirmation is not None
     assert res.reaction_confirmation.confirmed is True
-    assert res.reaction_confirmation.reaction_type == "REJECTION_WICK"
+    assert res.reaction_confirmation.reaction_type in ("15M_ENGULFING", "REJECTION_WICK")
     assert res.trade_setup is not None
     assert res.trade_setup.direction == TrendBias.BULLISH
     assert res.trade_setup.stop_loss < 96.0
     assert "REACTION CONFIRMED" in res.summary_message
+
+
+def test_structural_1h_liquidity_take_profit_targeting():
+    """Verify that TradeSetup targets 1H Swing High for Longs and 1H Swing Low for Shorts."""
+    from src.smc_engine import SwingPoint
+    from src.risk_manager import RiskManager
+    config = BotConfig(dry_run=True, use_structural_tp=True, min_target_rr=1.5)
+    rm = RiskManager(config)
+
+    # 1. Long with 1H Swing High at 85000 (Entry at 80000, SL at 78000, dist=2000)
+    # Potential R:R = (85000 - 80000) / 2078 = 2.41 (>= 1.5) -> TP set to 85000
+    setup_long = rm.calculate_trade_setup(
+        symbol="BTC",
+        direction=TrendBias.BULLISH,
+        entry_price=80000.0,
+        anchor_sl_price=78000.0,
+        target_tp_price=85000.0,
+        sz_decimals=5
+    )
+    assert setup_long is not None
+    assert setup_long.take_profit == 85000.0
+    assert setup_long.risk_reward == pytest.approx(2.41, rel=1e-2)
+
+    # 2. Long with 1H Swing High too close (at 81000, dist=1000, R:R=0.5 < 1.5) -> Enforces min R:R floor (80000 + 2000*2.5 = 85000)
+    setup_too_close = rm.calculate_trade_setup(
+        symbol="BTC",
+        direction=TrendBias.BULLISH,
+        entry_price=80000.0,
+        anchor_sl_price=78000.0,
+        target_tp_price=81000.0,
+        sz_decimals=5
+    )
+    assert setup_too_close is not None
+    assert setup_too_close.take_profit >= 85000.0
+
+    # 3. Short with 1H Swing Low at 72000 (Entry at 78000, SL at 80000, dist=2000)
+    # Potential R:R = (78000 - 72000) / 2080 = 2.88 (>= 1.5) -> TP set to 72000
+    setup_short = rm.calculate_trade_setup(
+        symbol="BTC",
+        direction=TrendBias.BEARISH,
+        entry_price=78000.0,
+        anchor_sl_price=80000.0,
+        target_tp_price=72000.0,
+        sz_decimals=5
+    )
+    assert setup_short is not None
+    assert setup_short.take_profit == 72000.0
+    assert setup_short.risk_reward == pytest.approx(2.88, rel=1e-2)
 
 
 def test_discount_premium_equilibrium_filter():

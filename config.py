@@ -32,6 +32,8 @@ class BotConfig:
     min_order_notional: float = float(os.getenv("MIN_ORDER_NOTIONAL", "11.0"))
     leverage: int = int(os.getenv("LEVERAGE", "3"))
     target_rr: float = float(os.getenv("TARGET_RR", "2.5"))
+    use_structural_tp: bool = os.getenv("USE_STRUCTURAL_TP", "true").lower() in ("true", "1", "yes")
+    min_target_rr: float = float(os.getenv("MIN_TARGET_RR", "1.5"))
     sl_buffer_pct: float = float(os.getenv("SL_BUFFER_PCT", "0.001"))
     max_open_positions: int = int(os.getenv("MAX_OPEN_POSITIONS", "1"))  # 1 position max for $10-$20 accounts
     
@@ -42,7 +44,9 @@ class BotConfig:
 
     # Strategy Configuration
     strategy_mode: str = os.getenv("STRATEGY_MODE", "DEMAND_FVG_CONFLUENCE").upper()  # "DEMAND_FVG_CONFLUENCE" or "SWEEP_BOS"
+    confirmation_timeframe: str = os.getenv("CONFIRMATION_TIMEFRAME", "15m").lower()  # "15m" or "5m"
     rejection_wick_ratio: float = float(os.getenv("REJECTION_WICK_RATIO", "0.30"))  # Min lower/upper wick ratio for reaction confirmation
+    rejection_wick_ratio_1h: float = float(os.getenv("REJECTION_WICK_RATIO_1H", "0.70"))  # 1H wick ratio >= 70% of body
     demand_zone_max_age_candles: int = int(os.getenv("DEMAND_ZONE_MAX_AGE_CANDLES", "50"))  # Max age of active demand/supply zone
     discount_premium_filter_enabled: bool = os.getenv("DISCOUNT_PREMIUM_FILTER_ENABLED", "true").lower() in ("true", "1", "yes")
     max_equilibrium_pct: float = float(os.getenv("MAX_EQUILIBRIUM_PCT", "0.50"))  # Longs <= 50% (Discount), Shorts >= 50% (Premium)

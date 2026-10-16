@@ -61,10 +61,11 @@ class RiskManager:
         anchor_sl_price: Optional[float] = None,
         demand_zone: Optional[DemandZone] = None,
         reaction: Optional[ReactionConfirmation] = None,
+        target_tp_price: Optional[float] = None,
     ) -> Optional[TradeSetup]:
         """
         Calculate entry, SL, TP, and position size.
-        Supports both 15M Liquidity Sweeps and Demand Zone / Reaction entries.
+        Supports 1H Swing High / Liquidity structural targeting with minimum R:R floor.
         Returns TradeSetup if valid, else None.
         """
         if entry_price <= 0:
@@ -87,8 +88,11 @@ class RiskManager:
             logger.warning(f"[{symbol}] No valid SL anchor provided (need sweep, anchor_sl_price, or demand_zone)")
             return None
 
-        # 1. Stop Loss Calculation
+        # 1. Stop Loss & Take Profit Calculation
         buffer = self.config.sl_buffer_pct
+        min_rr = getattr(self.config, "min_target_rr", 1.5)
+        use_structural = getattr(self.config, "use_structural_tp", True)
+
         if direction == TrendBias.BULLISH:
             # For LONG, SL is set below the anchor low
             stop_loss = sl_anchor * (1.0 - buffer)
@@ -97,7 +101,16 @@ class RiskManager:
                 return None
             sl_distance = entry_price - stop_loss
             sl_distance_pct = sl_distance / entry_price
-            take_profit = entry_price + (sl_distance * self.config.target_rr)
+
+            # Target 1H Swing High / Liquidity if available and meets minimum R:R floor
+            if use_structural and target_tp_price is not None and target_tp_price > entry_price:
+                potential_rr = (target_tp_price - entry_price) / sl_distance
+                if potential_rr >= min_rr:
+                    take_profit = target_tp_price
+                else:
+                    take_profit = entry_price + (sl_distance * self.config.target_rr)
+            else:
+                take_profit = entry_price + (sl_distance * self.config.target_rr)
         else:
             # For SHORT, SL is set above the anchor high
             stop_loss = sl_anchor * (1.0 + buffer)
@@ -106,7 +119,16 @@ class RiskManager:
                 return None
             sl_distance = stop_loss - entry_price
             sl_distance_pct = sl_distance / entry_price
-            take_profit = entry_price - (sl_distance * self.config.target_rr)
+
+            # Target 1H Swing Low / Liquidity if available and meets minimum R:R floor
+            if use_structural and target_tp_price is not None and target_tp_price < entry_price:
+                potential_rr = (entry_price - target_tp_price) / sl_distance
+                if potential_rr >= min_rr:
+                    take_profit = target_tp_price
+                else:
+                    take_profit = entry_price - (sl_distance * self.config.target_rr)
+            else:
+                take_profit = entry_price - (sl_distance * self.config.target_rr)
 
         # 2. Risk Sizing
         # Risk amount: user-defined fixed USD or 10% of balance, whichever is smaller
