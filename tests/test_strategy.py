@@ -191,3 +191,52 @@ def test_strategy_demand_fvg_confluence_trade_trigger():
     assert "REACTION CONFIRMED" in res.summary_message
 
 
+def test_discount_premium_equilibrium_filter():
+    """Verify that Longs are rejected in Premium (>50% Eq) and Shorts are rejected in Discount (<50% Eq)."""
+    from src.smc_engine import SwingPoint, TimeframeAnalysis
+    config = BotConfig(dry_run=True, discount_premium_filter_enabled=True, max_equilibrium_pct=0.50)
+    md = MarketDataClient(config)
+    strategy = MTFStrategy(config, md)
+
+    # Dealing range: 100 (Swing Low) to 200 (Swing High). Eq = 150.
+    sh = SwingPoint(index=10, timestamp=1700000000000, price=200.0, is_high=True)
+    sl = SwingPoint(index=5, timestamp=1700000000000, price=100.0, is_high=False)
+    analysis_1h = TimeframeAnalysis(
+        symbol="BTC",
+        timeframe="1h",
+        bias=TrendBias.BULLISH,
+        current_price=120.0,
+        last_swing_high=sh,
+        last_swing_low=sl
+    )
+    analyses = {"1h": analysis_1h}
+
+    # 1. Long at 120 (Discount: 120 <= 150) -> Accepted
+    valid, msg = strategy._check_discount_premium_equilibrium(TrendBias.BULLISH, 120.0, analyses)
+    assert valid is True
+    assert msg == ""
+
+    # 2. Long at 170 (Premium: 170 > 150) -> Rejected
+    valid, msg = strategy._check_discount_premium_equilibrium(TrendBias.BULLISH, 170.0, analyses)
+    assert valid is False
+    assert "In Premium zone" in msg
+    assert "Long Rejected" in msg
+
+    # 3. Short at 170 (Premium: 170 >= 150) -> Accepted
+    valid, msg = strategy._check_discount_premium_equilibrium(TrendBias.BEARISH, 170.0, analyses)
+    assert valid is True
+    assert msg == ""
+
+    # 4. Short at 120 (Discount: 120 < 150) -> Rejected
+    valid, msg = strategy._check_discount_premium_equilibrium(TrendBias.BEARISH, 120.0, analyses)
+    assert valid is False
+    assert "In Discount zone" in msg
+    assert "Short Rejected" in msg
+
+    # 5. When filter is disabled, all are accepted
+    config.discount_premium_filter_enabled = False
+    valid, msg = strategy._check_discount_premium_equilibrium(TrendBias.BULLISH, 170.0, analyses)
+    assert valid is True
+
+
+

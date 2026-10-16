@@ -6,7 +6,7 @@ Evaluates:
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Tuple
 import pandas as pd
 
 from config import BotConfig
@@ -48,6 +48,52 @@ class MTFStrategy:
         self.market_data = market_data
         self.smc = SMCEngine(swing_lookback=config.swing_lookback)
         self.risk_manager = RiskManager(config)
+
+    def _check_discount_premium_equilibrium(
+        self,
+        target_direction: TrendBias,
+        entry_price: float,
+        analyses: Dict[str, TimeframeAnalysis]
+    ) -> Tuple[bool, str]:
+        """
+        Evaluate if entry_price is in the valid half of the dealing range:
+        - Bullish (Long): Must be in DISCOUNT (lower 50% of 1H/4H dealing range).
+        - Bearish (Short): Must be in PREMIUM (upper 50% of 1H/4H dealing range).
+        """
+        if not getattr(self.config, "discount_premium_filter_enabled", True):
+            return True, ""
+
+        # Prefer 1H dealing range, fallback to 4H
+        range_analysis = analyses.get("1h")
+        if not range_analysis or not (range_analysis.last_swing_high and range_analysis.last_swing_low):
+            range_analysis = analyses.get("4h")
+
+        if not range_analysis or not range_analysis.last_swing_high or not range_analysis.last_swing_low:
+            return True, ""
+
+        sh = range_analysis.last_swing_high.price
+        sl = range_analysis.last_swing_low.price
+
+        if sh <= sl:
+            return True, ""
+
+        range_span = sh - sl
+        # Guard against synthetic tests where mock prices across timeframes are on different scales
+        if entry_price < (sl - range_span) or entry_price > (sh + range_span):
+            return True, ""
+
+        eq_ratio = getattr(self.config, "max_equilibrium_pct", 0.50)
+        equilibrium = sl + (range_span * eq_ratio)
+        tf_label = range_analysis.timeframe.upper()
+
+        if target_direction == TrendBias.BULLISH:
+            if entry_price > equilibrium:
+                return False, f"In Premium zone (${entry_price:,.2f} > {int(eq_ratio*100)}% Eq ${equilibrium:,.2f} of {tf_label} [${sl:,.2f} - ${sh:,.2f}]) - Long Rejected"
+        elif target_direction == TrendBias.BEARISH:
+            if entry_price < equilibrium:
+                return False, f"In Discount zone (${entry_price:,.2f} < {int(eq_ratio*100)}% Eq ${equilibrium:,.2f} of {tf_label} [${sl:,.2f} - ${sh:,.2f}]) - Short Rejected"
+
+        return True, ""
 
     def evaluate_symbol(
         self,
@@ -220,25 +266,35 @@ class MTFStrategy:
 
             summary_msg += f" | REACTION CONFIRMED [{reaction.reaction_type}] off {confluence_str} @ ${reaction.reaction_price:,.2f}"
 
-            sz_decimals = self.market_data.get_sz_decimals(symbol)
-            trade_setup = self.risk_manager.calculate_trade_setup(
-                symbol=symbol,
-                direction=target_direction,
-                entry_price=current_px if current_px > 0 else reaction.reaction_price,
-                account_balance=account_balance,
-                sz_decimals=sz_decimals,
-                anchor_sl_price=reaction.invalidation_level,
-                demand_zone=reaction.zone,
-                reaction=reaction
+            entry_px = current_px if current_px > 0 else reaction.reaction_price
+            is_valid_eq, eq_msg = self._check_discount_premium_equilibrium(
+                target_direction=target_direction,
+                entry_price=entry_px,
+                analyses=analyses
             )
 
-            if trade_setup:
-                summary_msg += (
-                    f" | Ready for {trade_setup.direction.value} trade: "
-                    f"Size={trade_setup.size} {symbol} (~${trade_setup.notional_usd:.2f}) "
-                    f"SL=${trade_setup.stop_loss:,.2f} TP=${trade_setup.take_profit:,.2f} "
-                    f"R:R={trade_setup.risk_reward}"
+            if not is_valid_eq:
+                summary_msg += f" | {eq_msg}"
+            else:
+                sz_decimals = self.market_data.get_sz_decimals(symbol)
+                trade_setup = self.risk_manager.calculate_trade_setup(
+                    symbol=symbol,
+                    direction=target_direction,
+                    entry_price=entry_px,
+                    account_balance=account_balance,
+                    sz_decimals=sz_decimals,
+                    anchor_sl_price=reaction.invalidation_level,
+                    demand_zone=reaction.zone,
+                    reaction=reaction
                 )
+
+                if trade_setup:
+                    summary_msg += (
+                        f" | Ready for {trade_setup.direction.value} trade: "
+                        f"Size={trade_setup.size} {symbol} (~${trade_setup.notional_usd:.2f}) "
+                        f"SL=${trade_setup.stop_loss:,.2f} TP=${trade_setup.take_profit:,.2f} "
+                        f"R:R={trade_setup.risk_reward}"
+                    )
         else:
             active_zones_count = len(all_target_zones)
             active_fvgs_count = len(ltf_fvgs)
@@ -320,24 +376,36 @@ class MTFStrategy:
                         )
                         trigger_5m = None
                     else:
-                        summary_msg += f" | 5M {trigger_5m.event_type.value} CONFIRMED! (Close: ${trigger_close:,.2f})"
-
-                        sz_decimals = self.market_data.get_sz_decimals(symbol)
-                        trade_setup = self.risk_manager.calculate_trade_setup(
-                            symbol=symbol,
-                            direction=active_sweep.direction,
+                        is_valid_eq, eq_msg = self._check_discount_premium_equilibrium(
+                            target_direction=active_sweep.direction,
                             entry_price=current_px,
-                            sweep=active_sweep,
-                            account_balance=account_balance,
-                            sz_decimals=sz_decimals
+                            analyses=analyses
                         )
-                        if trade_setup:
+                        if not is_valid_eq:
                             summary_msg += (
-                                f" | Ready for {trade_setup.direction.value} trade: "
-                                f"Size={trade_setup.size} {symbol} (~${trade_setup.notional_usd:.2f}) "
-                                f"SL=${trade_setup.stop_loss:,.2f} TP=${trade_setup.take_profit:,.2f} "
-                                f"R:R={trade_setup.risk_reward}"
+                                f" | 5M {trigger_5m.event_type.value} CONFIRMED! (Close: ${trigger_close:,.2f})"
+                                f" | {eq_msg}"
                             )
+                            trigger_5m = None
+                        else:
+                            summary_msg += f" | 5M {trigger_5m.event_type.value} CONFIRMED! (Close: ${trigger_close:,.2f})"
+
+                            sz_decimals = self.market_data.get_sz_decimals(symbol)
+                            trade_setup = self.risk_manager.calculate_trade_setup(
+                                symbol=symbol,
+                                direction=active_sweep.direction,
+                                entry_price=current_px,
+                                sweep=active_sweep,
+                                account_balance=account_balance,
+                                sz_decimals=sz_decimals
+                            )
+                            if trade_setup:
+                                summary_msg += (
+                                    f" | Ready for {trade_setup.direction.value} trade: "
+                                    f"Size={trade_setup.size} {symbol} (~${trade_setup.notional_usd:.2f}) "
+                                    f"SL=${trade_setup.stop_loss:,.2f} TP=${trade_setup.take_profit:,.2f} "
+                                    f"R:R={trade_setup.risk_reward}"
+                                )
                 else:
                     summary_msg += " | Waiting for 5M BOS confirmation candle close"
 

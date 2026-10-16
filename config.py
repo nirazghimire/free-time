@@ -44,6 +44,8 @@ class BotConfig:
     strategy_mode: str = os.getenv("STRATEGY_MODE", "DEMAND_FVG_CONFLUENCE").upper()  # "DEMAND_FVG_CONFLUENCE" or "SWEEP_BOS"
     rejection_wick_ratio: float = float(os.getenv("REJECTION_WICK_RATIO", "0.30"))  # Min lower/upper wick ratio for reaction confirmation
     demand_zone_max_age_candles: int = int(os.getenv("DEMAND_ZONE_MAX_AGE_CANDLES", "50"))  # Max age of active demand/supply zone
+    discount_premium_filter_enabled: bool = os.getenv("DISCOUNT_PREMIUM_FILTER_ENABLED", "true").lower() in ("true", "1", "yes")
+    max_equilibrium_pct: float = float(os.getenv("MAX_EQUILIBRIUM_PCT", "0.50"))  # Longs <= 50% (Discount), Shorts >= 50% (Premium)
 
     # Trailing Stop / Breakeven
     enable_breakeven_at_1r: bool = os.getenv("ENABLE_BREAKEVEN_AT_1R", "true").lower() in ("true", "1", "yes")
